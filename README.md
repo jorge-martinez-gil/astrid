@@ -1,6 +1,8 @@
 # ASTRID
 
-![ASTRID Logo](logo.png)
+<p align="center">
+  <img src="logo.png" width="40%" alt="ASTRID Logo">
+</p>
 
 **ASTRID** stands for **Advanced Software Tools for Reliable Industrial Datasets**.  
 The project delivers open-source software components and metrics to assess and improve the reliability of datasets used in industrial AI systems.
