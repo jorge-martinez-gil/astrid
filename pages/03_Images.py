@@ -21,6 +21,8 @@ import json
 import os
 import re
 import zipfile
+import base64
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,7 +46,7 @@ except Exception:
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from utils import SHARED_CSS, sha256_bytes as _sha256, badge as _badge, kpi as _kpi, health_ring_html, progress_bar_html, compute_health_score, to_json_safe as _to_json_safe
+from utils import SHARED_CSS, build_html_report, sha256_bytes as _sha256, badge as _badge, kpi as _kpi, health_ring_html, progress_bar_html, compute_health_score, to_json_safe as _to_json_safe
 
 st.set_page_config(page_title="Image Dataset Analyzer", page_icon="🖼", layout="wide")
 
@@ -762,12 +764,28 @@ def assess_quality(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame], cf
         "example_errors": img_df.loc[~open_ok, ["path_in_zip", "open_error"]].head(10).to_dict(orient="records"),
     }
 
+    # Missingness (metadata)
+    if meta_joined is not None and len(meta_joined) > 0:
+        miss = meta_joined.isna().mean().sort_values(ascending=False)
+        out["missingness"] = {
+            "overall_missing_rate": float(meta_joined.isna().mean().mean()),
+            "top_10_columns_missing_rate": miss.head(10).to_dict(),
+            "note": "Computed on metadata table (joined to images).",
+        }
+    else:
+        out["missingness"] = {
+            "overall_missing_rate": 0.0,
+            "top_10_columns_missing_rate": {},
+            "note": "No metadata provided; missingness set to 0.0.",
+        }
+
     # Resolution
     ok_df = img_df.loc[open_ok].copy()
     if ok_df.empty:
         out["low_resolution"] = {"note": "No images opened successfully."}
         out["blur_proxy"] = {"note": "No images opened successfully."}
         out["duplicates"] = {"note": "No images opened successfully."}
+        out["exact_duplicate_row_rate"] = None
         return out
 
     min_short = int(cfg.thresholds.min_resolution_short_side)
@@ -816,6 +834,9 @@ def assess_quality(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame], cf
         "perceptual_hamming_threshold": int(cfg.thresholds.perceptual_dup_hamming_threshold),
         "imagehash_available": bool(IMAGEHASH_OK),
     }
+
+    # For shared HTML report compatibility
+    out["exact_duplicate_row_rate"] = float(out.get("duplicates", {}).get("exact_duplicate_rate", 0.0))
 
     # Label stats and split leakage proxy (metadata)
     if meta_joined is not None and cfg.label_col and cfg.label_col in meta_joined.columns:
@@ -1097,18 +1118,54 @@ def assess_all(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame], cfg: A
 # Header
 # =========================
 
-st.markdown(
-    """
-    <div class="dsa-card">
-      <h1 style="margin-bottom:0.2rem;">Image Dataset Safety Analyzer</h1>
-      <div class="muted">
-        Upload a ZIP of images. Optional: upload metadata (CSV/Parquet) to enable label, split/time, and fairness checks.
-      </div>
+def _data_uri_from_file(p: str) -> str:
+    ext = os.path.splitext(p)[1].lower()
+    mime = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+    }.get(ext, "image/png")
+    b64 = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+def _find_logo_file() -> Optional[str]:
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "logo.png",
+        here / "logo.jpg",
+        here / "logo.jpeg",
+        here / "assets" / "logo.png",
+        here.parent / "assets" / "logo.png",
+        here.parent / "logo.png",
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return str(c)
+    return None
+
+_logo_path = _find_logo_file()
+if _logo_path:
+    try:
+        _logo_html = f'<img src="{_data_uri_from_file(_logo_path)}" style="width:34px;height:34px;object-fit:contain;border-radius:8px;" />'
+    except Exception:
+        _logo_html = '<span style="font-size:1.8rem;">🖼</span>'
+else:
+    _logo_html = '<span style="font-size:1.8rem;">🖼</span>'
+
+st.markdown(f"""
+<div class="dsa-card" style="padding:24px 28px 18px 28px; margin-bottom:16px;">
+  <div style="display:flex; align-items:center; gap:10px;">
+    {_logo_html}
+    <div>
+      <h2 style="margin:0;">Image Dataset Analyzer</h2>
+      <div class="muted">Upload a ZIP of images. Optional: upload metadata (CSV or Parquet) to enable label, split or time, and fairness checks.</div>
     </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.write("")
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
 
 
 # =========================
@@ -1125,6 +1182,8 @@ if zip_up is None:
     st.stop()
 
 zip_bytes = zip_up.getvalue()
+zip_file_name = getattr(zip_up, "name", None) or "images.zip"
+
 
 meta_df_raw = load_metadata_file(meta_up)
 if meta_df_raw is not None and "auto_meta_guesses" not in st.session_state:
@@ -1554,50 +1613,119 @@ with tab_security:
 with tab_export:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Export")
+    st.caption("All exports include report data, thresholds, and mode. JSON values are pandas or numpy safe.")
 
-    st.caption("Exports include the report, thresholds, and mode. JSON is safe for pandas/numpy types.")
-    st.json(safe_report)
+    cfg_dict = {
+        "mode": cfg.mode,
+        "preset": preset_name,
+        "thresholds": to_json_safe(getattr(cfg, "thresholds", {}).__dict__ if hasattr(getattr(cfg, "thresholds", {}), "__dict__") else getattr(cfg, "thresholds", {})),
+        "sampling": {
+            "max_images": int(cfg.max_images),
+            "sample_for_perceptual_dups": int(cfg.sample_for_perceptual_dups),
+            "sample_for_exif": int(cfg.sample_for_exif),
+            "max_pairs_for_near_dups": int(cfg.max_pairs_for_near_dups),
+            "random_state": int(cfg.random_state),
+        },
+        "columns": {
+            "path_col": cfg.path_col,
+            "label_col": cfg.label_col,
+            "split_col": cfg.split_col,
+            "time_col": cfg.time_col,
+            "group_cols": list(cfg.group_cols or []),
+            "id_cols": list(cfg.id_cols or []),
+        },
+        "metadata": cfg.metadata,
+        "imagehash_available": bool(IMAGEHASH_OK),
+    }
 
-    out_bytes = json.dumps(safe_report, indent=2, ensure_ascii=False).encode("utf-8")
-    st.download_button(
-        "Download JSON report",
-        data=out_bytes,
-        file_name="image_dataset_report.json",
-        mime="application/json",
-        use_container_width=True,
-    )
+    col_e1, col_e2, col_e3 = st.columns(3, gap="large")
 
-    md_lines: List[str] = []
-    md_lines.append("# Image Dataset Safety Analyzer report")
-    md_lines.append("")
-    md_lines.append(f"- Mode: {cfg.mode}")
-    md_lines.append(f"- Preset: {preset_name}")
-    md_lines.append(f"- Verdict: {verdict}")
-    md_lines.append("")
-    md_lines.append("## Reasons")
-    for r in reasons:
-        md_lines.append(f"- {r}")
-    md_lines.append("")
-    md_lines.append("## Recommended actions")
-    for r in recs:
-        md_lines.append(f"- {r}")
-    md_lines.append("")
-    md_lines.append("## Key metrics")
-    md_lines.append(f"- Images scanned: {len(img_df)}")
-    md_lines.append(f"- Corrupt rate: {report['quality']['corrupt_images']['corrupt_rate']:.4f}")
-    md_lines.append(f"- Exact duplicate rate: {report['quality'].get('duplicates', {}).get('exact_duplicate_rate', 0.0):.4f}")
-    md_lines.append(f"- ZIP SHA-256: {report['security']['integrity']['sha256_zip']}")
-    md_lines.append("")
-    md_lines.append("## Notes")
-    md_lines.append("- This is an automated heuristic report. Validate conclusions with domain review.")
+    with col_e1:
+        st.markdown("**JSON report**")
+        json_bytes = json.dumps({"report": safe_report, "config": cfg_dict}, indent=2, ensure_ascii=False).encode("utf-8")
+        st.download_button(
+            "⬇ Download JSON",
+            data=json_bytes,
+            file_name="image_dataset_report.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
-    md_bytes = ("\n".join(md_lines)).encode("utf-8")
-    st.download_button(
-        "Download Markdown summary",
-        data=md_bytes,
-        file_name="image_dataset_report_summary.md",
-        mime="text/markdown",
-        use_container_width=True,
-    )
+    with col_e2:
+        st.markdown("**Markdown summary**")
+        md_lines: List[str] = [
+            f"# Image Dataset Safety Report - {zip_file_name}",
+            "",
+            f"- **Mode:** {cfg.mode}",
+            f"- **Preset:** {preset_name}",
+            f"- **Health score:** {img_total_score}/100 (Grade {img_grade})",
+            f"- **Verdict:** {verdict}",
+            "",
+            "## Findings",
+            *[f"- {r}" for r in reasons],
+            "",
+            "## Recommended actions",
+            *[f"- {r}" for r in recs],
+            "",
+            "## Key metrics",
+            f"- Images scanned: {len(img_df):,}",
+            f"- Corrupt rate: {report['quality']['corrupt_images']['corrupt_rate']:.4f}",
+            f"- Exact duplicate rate: {report['quality'].get('duplicates', {}).get('exact_duplicate_rate', 0.0):.4f}",
+            f"- Low-res rate: {report['quality'].get('low_resolution', {}).get('low_res_rate', 0.0):.4f}",
+            f"- ZIP SHA-256: {sha256_bytes(zip_bytes)}",
+            "",
+            "---",
+            "*Heuristic report. Validate with domain and legal review.*",
+        ]
+        md_bytes = "\n".join(md_lines).encode("utf-8")
+        st.download_button(
+            "⬇ Download Markdown",
+            data=md_bytes,
+            file_name="image_dataset_report.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+
+    with col_e3:
+        st.markdown("**HTML report**")
+        try:
+            report_for_html = report
+            try:
+                # Some shared HTML templates expect Tabular/Time-Series key names.
+                # Map the Images PII scan to the expected structure when missing.
+                sec0 = report_for_html.get("security", {}) if isinstance(report_for_html, dict) else {}
+                if isinstance(sec0, dict) and "confidentiality_pii_heuristics" not in sec0:
+                    pii_src = sec0.get("pii_like_in_paths", {})
+                    # Keep the meaning but align the key so HTML export works everywhere.
+                    sec0["confidentiality_pii_heuristics"] = pii_src
+                    report_for_html["security"] = sec0
+            except Exception:
+                pass
+
+            html_content = build_html_report(
+                df=img_df,
+                report=report_for_html,
+                cfg_dict=cfg_dict,
+                file_name=zip_file_name,
+                file_bytes=zip_bytes,
+                verdict=verdict,
+                reasons=reasons,
+                recs=recs,
+                score=img_total_score,
+                grade=img_grade,
+            )
+            st.download_button(
+                "⬇ Download HTML",
+                data=html_content.encode("utf-8"),
+                file_name="image_dataset_report.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"HTML export unavailable: {e}")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    with st.expander("Raw JSON (preview)"):
+        st.json({"report": safe_report, "config": cfg_dict})
 
     st.markdown("</div>", unsafe_allow_html=True)
