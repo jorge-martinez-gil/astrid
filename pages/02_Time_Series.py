@@ -66,6 +66,349 @@ class AssessConfig:
     drift_max_num_cols: int = 50
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Metric documentation registry
+# ──────────────────────────────────────────────────────────────────────────────
+
+THRESHOLD_DOCS = {
+    "drift_ks_threshold": {
+        "label": "Drift KS threshold",
+        "description": "Reference cutoff for flagging strong numeric distribution shift between slices.",
+        "balanced": 0.30,
+        "strict": 0.20,
+        "lenient": 0.40,
+        "interpretation": "Higher values mean larger first-vs-last slice change.",
+    },
+    "pii_hit_rate_threshold": {
+        "label": "PII hit-rate threshold",
+        "description": "Minimum regex hit-rate needed before a text column is flagged by heuristic confidentiality checks.",
+        "balanced": 0.01,
+        "strict": 0.005,
+        "lenient": 0.02,
+        "interpretation": "Lower values make the scan more sensitive.",
+    },
+}
+
+METRIC_DOCS = {
+    "time_axis_health.time_parse.parse_ok_rate": {
+        "label": "Timestamp parse success rate",
+        "dimension": "Quality",
+        "what_it_is": "Fraction of rows whose selected time column parses successfully.",
+        "why_it_matters": "Broken timestamps make temporal checks unreliable.",
+        "how_computed": "Parse selected time column and count non-null timestamps.",
+        "interpretation": "Higher is better.",
+        "related_thresholds": [],
+    },
+    "time_axis_health.duplicate_timestamps.duplicate_rate": {
+        "label": "Duplicate timestamp rate",
+        "dimension": "Quality",
+        "what_it_is": "Share of repeated timestamps, optionally within entity keys.",
+        "why_it_matters": "Repeated time points may signal merge errors or duplicated measurements.",
+        "how_computed": "duplicated() over entity columns plus parsed timestamp.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "time_axis_health.cadence_global.irregularity_ratio": {
+        "label": "Cadence irregularity ratio",
+        "dimension": "Quality",
+        "what_it_is": "Spread of step sizes relative to the median cadence.",
+        "why_it_matters": "Irregular cadence can break assumptions in forecasting and monitoring workflows.",
+        "how_computed": "(p90 step - p10 step) / median step on positive timestamp differences.",
+        "interpretation": "Lower is more regular.",
+        "related_thresholds": [],
+    },
+    "time_axis_health.gaps_global.large_gap_rate": {
+        "label": "Large gap rate",
+        "dimension": "Quality",
+        "what_it_is": "Share of gaps larger than 10 times the median gap.",
+        "why_it_matters": "Long missing stretches reduce temporal coverage.",
+        "how_computed": "Compare gap sizes against 10x median gap.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+
+    "missingness.overall_missing_rate": {
+        "label": "Overall missingness",
+        "dimension": "Quality",
+        "what_it_is": "Average missing-value rate across all cells.",
+        "why_it_matters": "High missingness weakens validity, can bias training, and may break downstream steps.",
+        "how_computed": "Mean of df.isna() over the full table.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "missingness.top_10_columns_missing_rate": {
+        "label": "Column missingness profile",
+        "dimension": "Quality",
+        "what_it_is": "Worst columns ranked by missing-value rate.",
+        "why_it_matters": "Pinpoints which fields need repair or exclusion.",
+        "how_computed": "Column-wise df.isna().mean(), top 10 only.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "duplicates.exact_duplicate_row_rate": {
+        "label": "Exact duplicate row rate",
+        "dimension": "Quality",
+        "what_it_is": "Fraction of rows duplicated exactly.",
+        "why_it_matters": "Duplicates can inflate support and hide leakage.",
+        "how_computed": "df.duplicated().mean().",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "duplicates.duplicate_id_rate": {
+        "label": "Duplicate ID rate",
+        "dimension": "Quality",
+        "what_it_is": "Duplicate rate when restricted to selected ID columns.",
+        "why_it_matters": "Repeated identifiers often signal merge errors or broken primary keys.",
+        "how_computed": "df.duplicated(subset=id_cols).mean().",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "outliers_iqr.top_10_outlier_rate": {
+        "label": "IQR outlier rate",
+        "dimension": "Quality",
+        "what_it_is": "Share of values outside the 1.5 IQR rule for each numeric column.",
+        "why_it_matters": "Finds suspicious tails and potential data-entry or sensor issues.",
+        "how_computed": "Column-wise approximate IQR outlier rate, top 10 columns shown.",
+        "interpretation": "Lower is usually better, but true rare events can be valid.",
+        "related_thresholds": [],
+    },
+    "label_stats.label_missing_rate": {
+        "label": "Label missing rate",
+        "dimension": "Quality",
+        "what_it_is": "Fraction of rows without a label in the selected target column.",
+        "why_it_matters": "Missing labels reduce usable training signal.",
+        "how_computed": "y.isna().mean().",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "label_stats.label_cardinality": {
+        "label": "Label cardinality",
+        "dimension": "Quality",
+        "what_it_is": "Number of distinct labels.",
+        "why_it_matters": "Affects class balance, difficulty, and model design.",
+        "how_computed": "y.nunique(dropna=True).",
+        "interpretation": "Descriptive, not inherently good or bad.",
+        "related_thresholds": [],
+    },
+    "label_agreement.exact_agreement_rate": {
+        "label": "Exact annotator agreement",
+        "dimension": "Quality",
+        "what_it_is": "Share of rows where selected annotator columns agree exactly.",
+        "why_it_matters": "Low agreement may indicate ambiguous labeling or annotation drift.",
+        "how_computed": "Row-wise unique non-null labels <= 1.",
+        "interpretation": "Higher is better.",
+        "related_thresholds": [],
+    },
+    "split_leakage.row_hash_cross_split_rate": {
+        "label": "Cross-split leakage rate",
+        "dimension": "Quality",
+        "what_it_is": "Fraction of unique row hashes that appear across multiple splits.",
+        "why_it_matters": "Leakage inflates offline evaluation and weakens trust in performance estimates.",
+        "how_computed": "Hash rows excluding split column, then check if one hash appears in more than one split.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "reliability.missing_rate_by_slice": {
+        "label": "Missingness by slice",
+        "dimension": "Reliability",
+        "what_it_is": "Average missingness per split or time slice.",
+        "why_it_matters": "Shows whether data quality changes over time or across partitions.",
+        "how_computed": "Mean missing-value rate inside each slice.",
+        "interpretation": "Stable profiles are preferred.",
+        "related_thresholds": [],
+    },
+    "reliability.numeric_drift_ks_first_last": {
+        "label": "Numeric drift KS",
+        "dimension": "Reliability",
+        "what_it_is": "Kolmogorov-Smirnov statistic comparing first and last slice for numeric columns.",
+        "why_it_matters": "Flags distribution shift that may break old models or stale assumptions.",
+        "how_computed": "First-vs-last slice KS statistic per numeric column.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": ["drift_ks_threshold"],
+    },
+    "reliability.schema_consistency": {
+        "label": "Schema consistency",
+        "dimension": "Reliability",
+        "what_it_is": "Schema snapshot with inferred dtypes and constant columns.",
+        "why_it_matters": "Unexpected schema changes often precede pipeline failures.",
+        "how_computed": "Counts rows, columns, inferred types, and no-variance columns.",
+        "interpretation": "Few constant or malformed columns is better.",
+        "related_thresholds": [],
+    },
+    "robustness.rare_category_label_concentration": {
+        "label": "Rare-category label concentration",
+        "dimension": "Robustness",
+        "what_it_is": "Rare categorical values that map almost entirely to one label.",
+        "why_it_matters": "Can reveal hidden shortcuts, leakage, or brittle spurious cues.",
+        "how_computed": "Inspect rare category values and label concentration within each.",
+        "interpretation": "Fewer findings are better.",
+        "related_thresholds": [],
+    },
+    "robustness.row_anomaly_score_mad": {
+        "label": "MAD anomaly score",
+        "dimension": "Robustness",
+        "what_it_is": "Row-level anomaly score from median absolute deviation across numeric features.",
+        "why_it_matters": "Helps find records far from the bulk of the dataset.",
+        "how_computed": "Average scaled absolute distance from per-column medians.",
+        "interpretation": "Lower is safer; very high tails deserve review.",
+        "related_thresholds": [],
+    },
+    "robustness.label_predictability_auc": {
+        "label": "Label predictability AUC",
+        "dimension": "Robustness",
+        "what_it_is": "How well numeric features alone predict a binary label.",
+        "why_it_matters": "Very high AUC can signal leakage or trivially easy shortcuts.",
+        "how_computed": "Logistic regression with a train/test split and ROC AUC on held-out data.",
+        "interpretation": "Mid-range values are often healthier than near-perfect values.",
+        "related_thresholds": [],
+    },
+    "fairness.representation_share_top10": {
+        "label": "Group representation",
+        "dimension": "Fairness",
+        "what_it_is": "Observed share of each group.",
+        "why_it_matters": "Severe imbalance can produce uneven quality across groups.",
+        "how_computed": "Value-count share by selected group column.",
+        "interpretation": "More balanced representation is usually safer.",
+        "related_thresholds": [],
+    },
+    "fairness.positive_rate_by_group": {
+        "label": "Positive rate by group",
+        "dimension": "Fairness",
+        "what_it_is": "Observed positive-label rate in each group for binary tasks.",
+        "why_it_matters": "Large gaps can indicate label imbalance or structural disparities.",
+        "how_computed": "Mean of factorized binary label within each group.",
+        "interpretation": "Smaller disparities are preferred.",
+        "related_thresholds": [],
+    },
+    "fairness.positive_rate_disparity": {
+        "label": "Positive rate disparity",
+        "dimension": "Fairness",
+        "what_it_is": "Difference between the maximum and minimum group positive rates.",
+        "why_it_matters": "Summarizes the spread in observed label prevalence.",
+        "how_computed": "max(group positive rate) - min(group positive rate).",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "fairness.missingness_disparity_top10": {
+        "label": "Missingness disparity",
+        "dimension": "Fairness",
+        "what_it_is": "Largest between-group missingness gaps per column.",
+        "why_it_matters": "Some groups may be systematically less complete than others.",
+        "how_computed": "Per-column max missing rate minus min missing rate across groups.",
+        "interpretation": "Lower is better.",
+        "related_thresholds": [],
+    },
+    "security.confidentiality_pii_heuristics": {
+        "label": "PII heuristic scan",
+        "dimension": "Security",
+        "what_it_is": "Regex-based scan for email, phone-like, IP, and card-like patterns.",
+        "why_it_matters": "Flags confidentiality risk before sharing or deploying the dataset.",
+        "how_computed": "Sample text-like columns and compute regex hit-rates.",
+        "interpretation": "Fewer flagged columns are better. Heuristic only.",
+        "related_thresholds": ["pii_hit_rate_threshold"],
+    },
+    "security.integrity.sha256": {
+        "label": "File SHA-256",
+        "dimension": "Security",
+        "what_it_is": "Cryptographic hash of the uploaded file.",
+        "why_it_matters": "Supports traceability and integrity checks.",
+        "how_computed": "sha256_bytes(dataset_bytes).",
+        "interpretation": "Descriptive fingerprint.",
+        "related_thresholds": [],
+    },
+    "security.availability_asset_checks.byte_size": {
+        "label": "File byte size",
+        "dimension": "Security",
+        "what_it_is": "Observed upload size.",
+        "why_it_matters": "Useful for reproducibility and basic asset inventory.",
+        "how_computed": "len(dataset_bytes).",
+        "interpretation": "Descriptive inventory field.",
+        "related_thresholds": [],
+    },
+}
+
+def _threshold_table_rows():
+    return [
+        {
+            "Threshold": spec["label"],
+            "Key": key,
+            "Balanced": spec["balanced"],
+            "Strict": spec["strict"],
+            "Lenient": spec["lenient"],
+            "Meaning": spec["description"],
+        }
+        for key, spec in THRESHOLD_DOCS.items()
+    ]
+
+def _metric_doc_rows():
+    rows = []
+    for key, spec in METRIC_DOCS.items():
+        rows.append({
+            "Metric key": key,
+            "Label": spec["label"],
+            "Dimension": spec["dimension"],
+            "What it is": spec["what_it_is"],
+            "Why it matters": spec["why_it_matters"],
+            "How computed": spec["how_computed"],
+            "Interpretation": spec["interpretation"],
+            "Thresholds": ", ".join(spec.get("related_thresholds", [])),
+        })
+    return rows
+
+def render_metric_help_block(metric_keys: List[str], title: str = "What these checks mean") -> None:
+    rows = []
+    for key in metric_keys:
+        spec = METRIC_DOCS.get(key)
+        if spec:
+            rows.append({
+                "Metric": spec["label"],
+                "Purpose": spec["why_it_matters"],
+                "Method": spec["how_computed"],
+                "Interpretation": spec["interpretation"],
+                "Thresholds": ", ".join(spec.get("related_thresholds", [])) or "None",
+            })
+    if rows:
+        with st.expander(title):
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+def render_research_grade_transparency_tab(df, file_name, file_bytes, cfg_dict, report, preset_name, mode):
+    st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+    st.subheader("Transparency and methodology")
+    st.caption("This view exposes the active configuration, metric registry, and threshold semantics used by the analyzer.")
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        st.markdown("**Run configuration**")
+        cfg_rows = [{"Parameter": k, "Value": json.dumps(to_json_safe(v), ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)} for k, v in cfg_dict.items()]
+        cfg_rows += [
+            {"Parameter": "preset_name", "Value": str(preset_name)},
+            {"Parameter": "mode", "Value": str(mode)},
+            {"Parameter": "file_name", "Value": str(file_name)},
+            {"Parameter": "sha256", "Value": str(sha256_bytes(file_bytes))},
+        ]
+        st.dataframe(pd.DataFrame(cfg_rows), use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown("**Threshold reference table**")
+        st.dataframe(pd.DataFrame(_threshold_table_rows()), use_container_width=True, hide_index=True)
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("**Metric registry**")
+    st.dataframe(pd.DataFrame(_metric_doc_rows()), use_container_width=True, hide_index=True)
+
+    registry_payload = {
+        "analyzer": "time_series",
+        "threshold_docs": THRESHOLD_DOCS,
+        "metric_docs": METRIC_DOCS,
+    }
+    st.download_button(
+        "⬇ Download metric registry JSON",
+        data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="time_series_metric_registry.json",
+        mime="application/json",
+        use_container_width=False,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
 def _name_score(name: str, patterns: List[str]) -> float:
     n = name.lower().strip()
     return sum(1.0 for p in patterns if re.search(p, n))
@@ -633,6 +976,13 @@ with tab_q:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Quality signals")
     q = report["quality"]
+    render_metric_help_block([
+        "missingness.overall_missing_rate", "duplicates.exact_duplicate_row_rate",
+        "outliers_iqr.top_10_outlier_rate", "label_stats.label_missing_rate",
+        "label_stats.label_cardinality", "split_leakage.row_hash_cross_split_rate",
+        "time_axis_health.time_parse.parse_ok_rate", "time_axis_health.duplicate_timestamps.duplicate_rate",
+        "time_axis_health.cadence_global.irregularity_ratio", "time_axis_health.gaps_global.large_gap_rate"
+    ])
     miss_top = q["missingness"]["top_10_columns_missing_rate"]
     if miss_top:
         col1, col2 = st.columns(2, gap="large")
@@ -679,8 +1029,12 @@ with tab_q:
 
 with tab_r:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
-    st.subheader("Reliability — Stability & Drift")
+    st.subheader("Reliability - Stability and drift")
     r = report["reliability"]
+    render_metric_help_block([
+        "reliability.missing_rate_by_slice", "reliability.numeric_drift_ks_first_last",
+        "reliability.schema_consistency"
+    ])
     if "note" in r:
         st.warning(r["note"])
     else:
@@ -714,6 +1068,9 @@ with tab_rb:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Robustness")
     rb = report["robustness"]
+    render_metric_help_block([
+        "robustness.row_anomaly_score_mad"
+    ])
     ram = rb.get("row_anomaly_score_mad", {})
     if ram:
         st.markdown("**Row anomaly score (MAD-based)**")
@@ -734,6 +1091,10 @@ with tab_f:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Fairness proxies")
     f = report["fairness"]
+    render_metric_help_block([
+        "fairness.representation_share_top10", "fairness.positive_rate_by_group",
+        "fairness.positive_rate_disparity", "fairness.missingness_disparity_top10"
+    ])
     if "note" in f:
         st.warning(f["note"])
     else:
@@ -752,12 +1113,16 @@ with tab_f:
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab_t:
-    render_transparency_tab(df, file_name, file_bytes, cfg_dict, report)
+    render_research_grade_transparency_tab(df, file_name, file_bytes, cfg_dict, report, preset_name, mode)
 
 with tab_sec:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
-    st.subheader("Security — CIA prerequisites")
+    st.subheader("Security - CIA prerequisites")
     s = report["security"]
+    render_metric_help_block([
+        "security.confidentiality_pii_heuristics", "security.integrity.sha256",
+        "security.availability_asset_checks.byte_size"
+    ])
     sha = s["integrity"]["sha256"]
     st.markdown("**File integrity**")
     st.markdown(f'<div class="mono" style="font-size:0.8rem;word-break:break-all;padding:10px;border:1px solid var(--c-border);border-radius:8px;">{sha}</div>', unsafe_allow_html=True)
@@ -792,6 +1157,8 @@ with tab_exp:
                                           file_bytes=file_bytes, verdict=verdict, reasons=reasons,
                                           recs=recs, score=score, grade=grade)
         st.download_button("⬇ Download HTML", data=html_content.encode(), file_name="ts_report.html", mime="text/html", use_container_width=True)
+    registry_payload = {"analyzer": "time_series", "threshold_docs": THRESHOLD_DOCS, "metric_docs": METRIC_DOCS}
+    st.download_button("⬇ Download metric registry JSON", data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"), file_name="time_series_metric_registry.json", mime="application/json", use_container_width=True)
     with st.expander("Raw JSON (preview)"):
         st.json(safe_report)
     st.markdown('</div>', unsafe_allow_html=True)

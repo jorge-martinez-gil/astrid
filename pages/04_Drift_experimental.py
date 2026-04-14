@@ -437,6 +437,143 @@ SCENARIO_PRESETS: Dict[str, Dict[str, SimParams]] = {
 }
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Metric documentation registry
+# ──────────────────────────────────────────────────────────────────────────────
+
+DRIFT_METHOD_DOCS = {
+    "Static": {
+        "role": "Baseline without supervision after deployment.",
+        "query_policy": "No oracle or human queries.",
+        "expected_behavior": "Useful as a no-intervention control under drift.",
+    },
+    "SAL": {
+        "role": "Sliding-window active learning.",
+        "query_policy": "Oracle queried when uncertainty exceeds a rolling quantile threshold.",
+        "expected_behavior": "Improves recovery but spends oracle budget continuously.",
+    },
+    "ADWIN-SAL": {
+        "role": "Drift-aware active learning.",
+        "query_policy": "Oracle queried with a higher budget during ADWIN alarm windows.",
+        "expected_behavior": "Should react faster after detected shift.",
+    },
+    "Symbiosis-Edge": {
+        "role": "Two-threshold routing with oracle and human.",
+        "query_policy": "Medium uncertainty goes to oracle, highest uncertainty goes to human.",
+        "expected_behavior": "Trades cost against post-drift quality with richer supervision routing.",
+    },
+}
+
+METRIC_DOCS = {
+    "summary.acc": {
+        "label": "Post-drift accuracy",
+        "dimension": "Performance",
+        "what_it_is": "Accuracy measured on post-drift samples only.",
+        "why_it_matters": "The simulator is meant to compare recovery under drift.",
+        "how_computed": "Mean of y_pred == y_true after drift_t.",
+        "interpretation": "Higher is better.",
+    },
+    "summary.lift": {
+        "label": "Accuracy lift vs Static",
+        "dimension": "Performance",
+        "what_it_is": "Accuracy gain relative to the Static baseline.",
+        "why_it_matters": "Shows whether intervention beats doing nothing.",
+        "how_computed": "Method accuracy minus Static accuracy on the same post-drift region.",
+        "interpretation": "Higher is better.",
+    },
+    "summary.queries_oracle": {
+        "label": "Oracle queries",
+        "dimension": "Budget",
+        "what_it_is": "Count of timesteps routed to the oracle.",
+        "why_it_matters": "Tracks supervision burden.",
+        "how_computed": "Sum of per-step oracle query flags after drift filtering.",
+        "interpretation": "Lower cost burden, but not always better.",
+    },
+    "summary.queries_human": {
+        "label": "Human queries",
+        "dimension": "Budget",
+        "what_it_is": "Count of timesteps routed to a human annotator.",
+        "why_it_matters": "Human review is expensive and usually highest quality.",
+        "how_computed": "Sum of per-step human query flags after drift filtering.",
+        "interpretation": "Lower cost burden, but not always better.",
+    },
+    "summary.total_cost": {
+        "label": "Total supervision cost",
+        "dimension": "Budget",
+        "what_it_is": "Post-drift cost under the configured edge/oracle/human cost model.",
+        "why_it_matters": "Makes budget/performance trade-offs explicit.",
+        "how_computed": "Weighted sum of query counts and edge step costs.",
+        "interpretation": "Lower is cheaper.",
+    },
+    "summary.roi": {
+        "label": "ROI",
+        "dimension": "Budget",
+        "what_it_is": "Lift divided by total cost.",
+        "why_it_matters": "Summarizes gain per unit cost.",
+        "how_computed": "lift / total_cost when cost > 0.",
+        "interpretation": "Higher is better.",
+    },
+    "uncertainty": {
+        "label": "Uncertainty score",
+        "dimension": "Mechanism",
+        "what_it_is": "Score derived from entropy and class-probability margin.",
+        "why_it_matters": "Drives query decisions for SAL, ADWIN-SAL, and Symbiosis-Edge.",
+        "how_computed": "entropy(p) + alpha * (1 - margin(p)).",
+        "interpretation": "Higher means more uncertainty.",
+    },
+    "adwin_alarm": {
+        "label": "ADWIN alarm behavior",
+        "dimension": "Mechanism",
+        "what_it_is": "Adaptive window detector used to trigger higher-budget querying.",
+        "why_it_matters": "Lets ADWIN-SAL react more strongly around detected change points.",
+        "how_computed": "Compare mean shift across candidate cuts inside a bounded history window.",
+        "interpretation": "Alarms are useful when they align with real drift, not too often.",
+    },
+    "annotator_accuracy": {
+        "label": "Annotator accuracy",
+        "dimension": "Mechanism",
+        "what_it_is": "Configured correctness rates for oracle and human supervision.",
+        "why_it_matters": "Affects how much each query improves state.",
+        "how_computed": "Bernoulli correctness in _apply_supervision with configured accuracies.",
+        "interpretation": "Higher is better.",
+    },
+}
+
+def _metric_doc_rows():
+    return [{
+        "Metric key": key,
+        "Label": spec["label"],
+        "Dimension": spec["dimension"],
+        "What it is": spec["what_it_is"],
+        "Why it matters": spec["why_it_matters"],
+        "How computed": spec["how_computed"],
+        "Interpretation": spec["interpretation"],
+    } for key, spec in METRIC_DOCS.items()]
+
+def _method_doc_rows():
+    return [{
+        "Method": key,
+        "Role": spec["role"],
+        "Query policy": spec["query_policy"],
+        "Expected behavior": spec["expected_behavior"],
+    } for key, spec in DRIFT_METHOD_DOCS.items()]
+
+def render_metric_help_block(metric_keys: List[str], title: str = "What these checks mean") -> None:
+    rows = []
+    for key in metric_keys:
+        spec = METRIC_DOCS.get(key)
+        if spec:
+            rows.append({
+                "Metric": spec["label"],
+                "Purpose": spec["why_it_matters"],
+                "Method": spec["how_computed"],
+                "Interpretation": spec["interpretation"],
+            })
+    if rows:
+        with st.expander(title):
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Simulator
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1251,6 +1388,7 @@ tabs = st.tabs(tab_names)
 # ── Overview ──
 with tabs[0]:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+    render_metric_help_block(["summary.acc", "summary.lift", "summary.total_cost", "summary.roi"], "How to read the overview metrics")
     st.subheader("Overview — all datasets")
 
     for ds in ds_configs:
@@ -1275,6 +1413,7 @@ with tabs[0]:
 for idx, ds in enumerate(ds_configs):
     with tabs[1 + idx]:
         st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+        render_metric_help_block(["summary.acc", "summary.lift", "summary.queries_oracle", "summary.queries_human", "summary.total_cost", "summary.roi", "uncertainty", "adwin_alarm", "annotator_accuracy"], "How to read these simulation outputs")
         st.subheader(f"{ds.name} — Detailed results")
 
         df_ds = df_all[df_all[schema.dataset] == ds.name].copy()
@@ -1404,7 +1543,7 @@ with tabs[2 + len(ds_configs)]:
 # ── Transparency ──
 with tabs[3 + len(ds_configs)]:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
-    st.subheader("Transparency — Configuration & Check Registry")
+    st.subheader("Transparency - Configuration and check registry")
 
     # Config table
     st.markdown('<div style="font-weight:700; margin-bottom:8px;">⚙️ Simulation configuration</div>',
@@ -1436,6 +1575,14 @@ with tabs[3 + len(ds_configs)]:
         st.markdown(html_c, unsafe_allow_html=True)
         st.write("---")
 
+    st.markdown('<div style="font-weight:700; margin-bottom:8px;">📘 Method registry</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(_method_doc_rows()), use_container_width=True, hide_index=True)
+    st.write("---")
+
+    st.markdown('<div style="font-weight:700; margin-bottom:8px;">📏 Metric registry</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(_metric_doc_rows()), use_container_width=True, hide_index=True)
+    st.write("---")
+
     # Check registry
     st.markdown('<div style="font-weight:700; margin-bottom:8px;">📋 Check registry</div>',
                 unsafe_allow_html=True)
@@ -1452,6 +1599,8 @@ with tabs[3 + len(ds_configs)]:
     st.dataframe(pd.DataFrame(checks, columns=["Check", "Status"]),
                   use_container_width=True, hide_index=True)
 
+    registry_payload = {"analyzer": "drift_simulation", "method_docs": DRIFT_METHOD_DOCS, "metric_docs": METRIC_DOCS}
+    st.download_button("⬇ Download metric registry JSON", data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"), file_name="drift_metric_registry.json", mime="application/json", use_container_width=False)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Export ──
@@ -1556,6 +1705,8 @@ with tabs[4 + len(ds_configs)]:
                 use_container_width=True,
             )
 
+    registry_payload = {"analyzer": "drift_simulation", "method_docs": DRIFT_METHOD_DOCS, "metric_docs": METRIC_DOCS}
+    st.download_button("⬇ Download metric registry JSON", data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"), file_name="drift_metric_registry.json", mime="application/json", use_container_width=True)
     with st.expander("Raw JSON (preview)"):
         st.json(export_payload)
 
