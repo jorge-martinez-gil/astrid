@@ -152,6 +152,76 @@ hr { border: none; height: 1px; background: var(--c-border); margin: 1rem 0; }
 
 /* Small muted text */
 .muted { font-size: 0.8rem; color: var(--c-muted); }
+
+/* ── Hover lift for cards ─────────────────────────────────── */
+.dsa-card {
+  transition: background 0.2s, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.dsa-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+}
+
+/* ── Feature cards with coloured top-border accent ───────── */
+.feature-card {
+  border-top-width: 3px !important;
+  border-top-style: solid !important;
+}
+.feature-card-blue   { border-top-color: #3b82f6 !important; }
+.feature-card-purple { border-top-color: #a855f7 !important; }
+.feature-card-orange { border-top-color: #f97316 !important; }
+
+/* ── Gradient accent line (animated) ─────────────────────── */
+@keyframes gradientShift {
+  0%   { background-position: 0%   50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0%   50%; }
+}
+.gradient-accent {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #3b82f6, #a855f7, #f97316, #3b82f6);
+  background-size: 300% 300%;
+  animation: gradientShift 4s ease infinite;
+  margin: 8px 0 18px 0;
+}
+
+/* ── Step circles in "How it works" ──────────────────────── */
+.step-circle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 50%;
+  font-size: 1.1rem; font-weight: 800;
+  background: rgba(99,102,241,0.18);
+  border: 2px solid rgba(99,102,241,0.35);
+  margin-bottom: 8px;
+}
+
+/* ── Open-analyzer hint link ──────────────────────────────── */
+.open-hint {
+  display: block; margin-top: 14px;
+  font-size: 0.82rem; font-weight: 600;
+  color: rgba(148,163,184,0.75);
+  letter-spacing: 0.02em;
+}
+.open-hint:hover { color: #818cf8; }
+
+/* ── Footer ───────────────────────────────────────────────── */
+.dsa-footer {
+  border-top: 1px solid var(--c-border);
+  margin-top: 36px;
+  padding-top: 20px;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--c-muted);
+  line-height: 1.9;
+}
+.dsa-footer a { color: rgba(148,163,184,0.85); text-decoration: none; }
+.dsa-footer a:hover { color: #818cf8; }
+
+/* ── Responsive feature columns ──────────────────────────── */
+@media (max-width: 768px) {
+  .feature-cols { grid-template-columns: 1fr !important; }
+}
 </style>
 """
 
