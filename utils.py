@@ -433,14 +433,38 @@ def check_status_card(label: str, icon: str, status: str, detail: str) -> str:
 # Health score
 # ─────────────────────────────────────────────
 
-def compute_health_score(report: Dict[str, Any], drift_threshold: float = 0.30) -> Tuple[int, str, Dict[str, float]]:
+DEFAULT_WEIGHTS: Dict[str, float] = {
+    "quality":     35,
+    "security":    25,
+    "reliability": 20,
+    "robustness":  10,
+    "fairness":    10,
+}
+
+
+def compute_health_score(
+    report: Dict[str, Any],
+    drift_threshold: float = 0.30,
+    weights: Optional[Dict[str, float]] = None,
+) -> Tuple[int, str, Dict[str, float]]:
     """
     Returns (score 0-100, grade, component breakdown).
-    Weights: Quality 35%, Security 25%, Reliability 20%, Robustness 10%, Fairness 10%
+    Default weights: Quality 35%, Security 25%, Reliability 20%, Robustness 10%, Fairness 10%.
+    Pass a custom ``weights`` dict to override; values are normalised automatically so they
+    do not need to sum to exactly 100.
     """
+    if weights is None:
+        weights = DEFAULT_WEIGHTS
+
+    # Normalise supplied weights so they always sum to 100
+    w_sum = sum(weights.values())
+    if w_sum <= 0:
+        w_sum = 1.0
+    norm_w: Dict[str, float] = {k: v / w_sum * 100.0 for k, v in weights.items()}
+
     components: Dict[str, float] = {}
 
-    # Quality (35%)
+    # Quality
     q = report.get("quality", {})
     miss = float(q.get("missingness", {}).get("overall_missing_rate", 0))
     dup  = float(q.get("duplicates", {}).get("exact_duplicate_row_rate", 0))
@@ -451,14 +475,14 @@ def compute_health_score(report: Dict[str, Any], drift_threshold: float = 0.30) 
     ]
     if leak is not None:
         q_scores.append(0.0 if float(leak) > 0 else 1.0)
-    components["quality"] = (sum(q_scores) / len(q_scores)) * 35
+    components["quality"] = (sum(q_scores) / len(q_scores)) * norm_w.get("quality", 35)
 
-    # Security (25%)
+    # Security
     s = report.get("security", {})
     pii_hits = s.get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
-    components["security"] = 0.0 if pii_hits else 25.0
+    components["security"] = 0.0 if pii_hits else norm_w.get("security", 25)
 
-    # Reliability (20%)
+    # Reliability
     r = report.get("reliability", {})
     drift = r.get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
     if drift:
@@ -466,28 +490,32 @@ def compute_health_score(report: Dict[str, Any], drift_threshold: float = 0.30) 
         r_score = max(0.0, 1.0 - max_ks / max(drift_threshold, 0.01))
     else:
         r_score = 0.75  # unknown → neutral
-    components["reliability"] = r_score * 20
+    components["reliability"] = r_score * norm_w.get("reliability", 20)
 
-    # Robustness (10%)
+    # Robustness
     rb = report.get("robustness", {})
     p99 = rb.get("row_anomaly_score_mad", {}).get("p99", None)
     if p99 is not None:
         rb_score = max(0.0, 1.0 - float(p99) / 20.0)
     else:
         rb_score = 0.75
-    components["robustness"] = rb_score * 10
+    components["robustness"] = rb_score * norm_w.get("robustness", 10)
 
-    # Fairness (10%)
+    # Fairness
     f = report.get("fairness", {})
     if "note" in f:
-        components["fairness"] = 7.5  # not evaluated → neutral
+        components["fairness"] = 0.75 * norm_w.get("fairness", 10)
     else:
         disp_scores = []
         for gcol, stats in f.get("group_checks", {}).items():
             disp = stats.get("positive_rate_disparity", None)
             if disp is not None:
                 disp_scores.append(max(0.0, 1.0 - float(disp) / 0.5))
-        components["fairness"] = (sum(disp_scores) / len(disp_scores) * 10) if disp_scores else 7.5
+        components["fairness"] = (
+            (sum(disp_scores) / len(disp_scores)) * norm_w.get("fairness", 10)
+            if disp_scores
+            else 0.75 * norm_w.get("fairness", 10)
+        )
 
     total = round(min(100, max(0, sum(components.values()))))
 

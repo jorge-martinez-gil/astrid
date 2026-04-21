@@ -11,6 +11,7 @@ from utils import (
     compute_health_score, get_dimension_status, render_transparency_tab,
     build_html_report, PII_PATTERNS, infer_column_types,
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
+    DEFAULT_WEIGHTS
 )
 
 from dataclasses import dataclass, field
@@ -856,6 +857,30 @@ with st.sidebar:
         annotator_cols = st.multiselect("Annotator label columns", filtered, default=[])
         random_state   = st.number_input("Random seed", min_value=0, max_value=10000, value=7, step=1)
 
+    with st.expander("⚖️ Score Weights", expanded=False):
+        st.caption("Adjust how much each dimension contributes to the overall health score. Values are normalised automatically.")
+        w_quality     = st.slider("Quality",     0, 100, DEFAULT_WEIGHTS["quality"],     step=5, key="weight_quality")
+        w_security    = st.slider("Security",    0, 100, DEFAULT_WEIGHTS["security"],    step=5, key="weight_security")
+        w_reliability = st.slider("Reliability", 0, 100, DEFAULT_WEIGHTS["reliability"], step=5, key="weight_reliability")
+        w_robustness  = st.slider("Robustness",  0, 100, DEFAULT_WEIGHTS["robustness"],  step=5, key="weight_robustness")
+        w_fairness    = st.slider("Fairness",    0, 100, DEFAULT_WEIGHTS["fairness"],     step=5, key="weight_fairness")
+        w_total = w_quality + w_security + w_reliability + w_robustness + w_fairness
+        if w_total == 100:
+            st.success(f"✓ Sum: {w_total}")
+        else:
+            st.warning(f"⚠ Sum: {w_total} — will be normalised automatically")
+        if st.button("Reset to defaults", key="reset_weights"):
+            for dim, val in DEFAULT_WEIGHTS.items():
+                st.session_state[f"weight_{dim}"] = val
+
+    user_weights = {
+        "quality":     st.session_state.get("weight_quality",     DEFAULT_WEIGHTS["quality"]),
+        "security":    st.session_state.get("weight_security",    DEFAULT_WEIGHTS["security"]),
+        "reliability": st.session_state.get("weight_reliability", DEFAULT_WEIGHTS["reliability"]),
+        "robustness":  st.session_state.get("weight_robustness",  DEFAULT_WEIGHTS["robustness"]),
+        "fairness":    st.session_state.get("weight_fairness",    DEFAULT_WEIGHTS["fairness"]),
+    }
+
     st.divider()
     run = st.button("🔬 Run analysis", type="primary", use_container_width=True)
 
@@ -884,7 +909,7 @@ with st.spinner("Running checks…"):
 safe_report = to_json_safe(report)
 verdict, vkind, reasons = verdict_panel(report, cfg)
 recs = build_recommendations(report, cfg)
-score, grade, score_components = compute_health_score(report, th.drift_ks_threshold)
+score, grade, score_components = compute_health_score(report, th.drift_ks_threshold, weights=user_weights)
 dim_status = get_dimension_status(report, th.drift_ks_threshold)
 
 cfg_dict = {"mode": mode, "preset": preset_name, "drift_ks_threshold": th.drift_ks_threshold,
@@ -945,8 +970,9 @@ with tab_ov:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.08em;opacity:0.5;margin-bottom:8px;">Score breakdown</div>', unsafe_allow_html=True)
         for dim, pts in score_components.items():
-            weight = {"quality": 35, "security": 25, "reliability": 20, "robustness": 10, "fairness": 10}.get(dim, 10)
-            st.markdown(progress_bar_html(dim.title(), pts / weight if weight else 0, reverse=False, fmt=".0%"), unsafe_allow_html=True)
+            _w_sum = sum(user_weights.values()) or 1.0
+            effective_w = user_weights.get(dim, DEFAULT_WEIGHTS.get(dim, 10)) / _w_sum * 100
+            st.markdown(progress_bar_html(dim.title(), pts / effective_w if effective_w else 0, reverse=False, fmt=".0%"), unsafe_allow_html=True)
     with col_dims:
         icons = {"Quality": "🔍", "Reliability": "📉", "Robustness": "🛡", "Fairness": "⚖️", "Security": "🔒"}
         for i, (dim, (status, detail)) in enumerate(dim_status.items()):
