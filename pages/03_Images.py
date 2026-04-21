@@ -65,10 +65,11 @@ except Exception:
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 try:
-    from utils import SHARED_CSS, build_html_report, sha256_bytes as _sha256_util, badge as _badge_util, kpi as _kpi_util, health_ring_html, progress_bar_html, compute_health_score, to_json_safe as _to_json_safe_util
+    from utils import SHARED_CSS, build_html_report, sha256_bytes as _sha256_util, badge as _badge_util, kpi as _kpi_util, health_ring_html, progress_bar_html, compute_health_score, to_json_safe as _to_json_safe_util, DEFAULT_WEIGHTS
     HAS_UTILS = True
 except Exception:
     HAS_UTILS = False
+    DEFAULT_WEIGHTS = {"quality": 35, "security": 25, "reliability": 20, "robustness": 10, "fairness": 10}
 
 st.set_page_config(page_title="Image Dataset Trustworthiness Analyzer (Experimental)", page_icon="🔬", layout="wide")
 
@@ -2054,8 +2055,14 @@ def assess_all(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame],
 # Scoring + verdict
 # =========================
 
-def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig) -> Dict[str, Any]:
-    """Compute per-property scores (0-100) and overall DTI."""
+def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig, weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """Compute per-property scores (0-100) and overall DTI.
+
+    When *weights* is supplied the five main dimensions (quality, security,
+    reliability, robustness, fairness) are rescaled proportionally so they
+    together fill the 92 points that remain after the fixed transparency
+    contribution (8 pts).  Values are normalised automatically.
+    """
     scores: Dict[str, float] = {}
     details: Dict[str, List[str]] = {}
 
@@ -2205,6 +2212,34 @@ def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig) -> Dict[str
     scores["security"] = max(0, s_score)
     details["security"] = s_notes
 
+    # Base max-possible values (used for fraction computation and display)
+    base_max: Dict[str, float] = {
+        "quality": 35, "reliability": 20, "robustness": 15,
+        "fairness": 15, "transparency": 8, "security": 7,
+    }
+
+    if weights is not None:
+        # Apply user-defined weights for the 5 standard dimensions.
+        # Transparency keeps its fixed 8-point contribution; the remaining
+        # 92 points are distributed proportionally across the 5 main dims.
+        main_dims = ["quality", "security", "reliability", "robustness", "fairness"]
+        w_sum = sum(weights.get(d, base_max.get(d, 0)) for d in main_dims)
+        if w_sum <= 0:
+            w_sum = 1.0
+        transp_max = base_max["transparency"]
+        remaining = 100.0 - transp_max
+        max_possible: Dict[str, float] = {"transparency": transp_max}
+        for dim in main_dims:
+            fraction = scores[dim] / base_max[dim] if base_max[dim] > 0 else 0.0
+            norm_w = weights.get(dim, base_max.get(dim, 0)) / w_sum * remaining
+            scores[dim] = fraction * norm_w
+            max_possible[dim] = norm_w
+        # Re-scale transparency fraction using fixed max
+        t_fraction = scores.get("transparency", 0.0) / transp_max if transp_max > 0 else 0.0
+        scores["transparency"] = t_fraction * transp_max
+    else:
+        max_possible = dict(base_max)
+
     total = round(min(100, sum(scores.values())))
     grade = "A" if total >= 90 else ("B" if total >= 80 else ("C" if total >= 70 else ("D" if total >= 60 else "F")))
 
@@ -2212,7 +2247,7 @@ def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig) -> Dict[str
         "scores": scores,
         "total": total,
         "grade": grade,
-        "max_possible": {"quality": 35, "reliability": 20, "robustness": 15, "fairness": 15, "transparency": 8, "security": 7},
+        "max_possible": max_possible,
         "details": details,
     }
 
@@ -2440,6 +2475,30 @@ with st.sidebar:
         ds_limitations = st.text_area("Known limitations", height=60, value="")
         ds_intended_use = st.text_area("Intended and non-intended uses", height=60, value="")
 
+    with st.expander("⚖️ Score Weights", expanded=False):
+        st.caption("Adjust how much each dimension contributes to the overall health score. Values are normalised automatically.")
+        w_quality     = st.slider("Quality",     0, 100, DEFAULT_WEIGHTS["quality"],     step=5, key="weight_quality")
+        w_security    = st.slider("Security",    0, 100, DEFAULT_WEIGHTS["security"],    step=5, key="weight_security")
+        w_reliability = st.slider("Reliability", 0, 100, DEFAULT_WEIGHTS["reliability"], step=5, key="weight_reliability")
+        w_robustness  = st.slider("Robustness",  0, 100, DEFAULT_WEIGHTS["robustness"],  step=5, key="weight_robustness")
+        w_fairness    = st.slider("Fairness",    0, 100, DEFAULT_WEIGHTS["fairness"],     step=5, key="weight_fairness")
+        w_total = w_quality + w_security + w_reliability + w_robustness + w_fairness
+        if w_total == 100:
+            st.success(f"✓ Sum: {w_total}")
+        else:
+            st.warning(f"⚠ Sum: {w_total} — will be normalised automatically")
+        if st.button("Reset to defaults", key="reset_weights"):
+            for dim, val in DEFAULT_WEIGHTS.items():
+                st.session_state[f"weight_{dim}"] = val
+
+    user_weights = {
+        "quality":     st.session_state.get("weight_quality",     DEFAULT_WEIGHTS["quality"]),
+        "security":    st.session_state.get("weight_security",    DEFAULT_WEIGHTS["security"]),
+        "reliability": st.session_state.get("weight_reliability", DEFAULT_WEIGHTS["reliability"]),
+        "robustness":  st.session_state.get("weight_robustness",  DEFAULT_WEIGHTS["robustness"]),
+        "fairness":    st.session_state.get("weight_fairness",    DEFAULT_WEIGHTS["fairness"]),
+    }
+
     run = st.button("Run analysis", type="primary", use_container_width=True)
 
 
@@ -2536,7 +2595,7 @@ with st.spinner("Running comprehensive trustworthiness checks..."):
 safe_report = to_json_safe(report)
 verdict, kind, reasons = verdict_panel(report, cfg)
 recs = build_recommendations(report, cfg)
-scoring = compute_metric_scores(report, cfg)
+scoring = compute_metric_scores(report, cfg, weights=user_weights)
 total_score = scoring["total"]
 grade = scoring["grade"]
 prop_scores = scoring["scores"]
