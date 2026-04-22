@@ -399,5 +399,5 @@ If you use ASTRID in academic work, please cite:
 
 ## Acknowledgements
 
-ASTRID is developed within the scope of European research and innovation activities focused on trustworthy AI for industry. Further details on funding and collaborations will be added as the project progresses.
+The **Advanced Software Tools for Reliable Industrial Datasets (ASTRID)** action has received funding from the EU, via **oc1-2025-TIS-01** issued and implemented by the **ENFIELD project**, under the grant agreement No **101120657**.
 
