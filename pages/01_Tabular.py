@@ -797,7 +797,7 @@ st.markdown("""
     <span style="font-size:1.8rem;">📊</span>
     <div>
       <h2 style="margin:0;">Tabular Dataset Analyzer</h2>
-      <div class="muted">Upload a CSV or Parquet, configure columns, run the scan.</div>
+      <div class="muted">Upload a CSV, Parquet, or Excel file, configure columns, run the scan.</div>
     </div>
   </div>
 </div>
@@ -809,7 +809,7 @@ st.markdown("""
 
 with st.sidebar:
     st.header("📁 Upload")
-    uploaded = st.file_uploader("CSV or Parquet", type=["csv", "parquet"])
+    uploaded = st.file_uploader("CSV, Parquet, or Excel", type=["csv", "parquet", "xls", "xlsx"])
 
 if uploaded is None:
     st.info("⬆️  Upload a dataset from the sidebar to begin.")
@@ -819,10 +819,16 @@ file_bytes = uploaded.getvalue()
 file_name  = uploaded.name or "dataset"
 
 try:
-    if file_name.lower().endswith(".csv"):
+    lower_name = file_name.lower()
+    if lower_name.endswith(".csv"):
         df = pd.read_csv(BytesIO(file_bytes)); detected = "CSV"
-    else:
+    elif lower_name.endswith(".parquet"):
         df = pd.read_parquet(BytesIO(file_bytes)); detected = "Parquet"
+    elif lower_name.endswith((".xls", ".xlsx")):
+        df = pd.read_excel(BytesIO(file_bytes)); detected = "Excel"
+    else:
+        st.error("Unsupported file type. Upload CSV, Parquet, XLS, or XLSX.")
+        st.stop()
 except Exception as e:
     st.error(f"Failed to load file: {e}"); st.stop()
 

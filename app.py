@@ -105,6 +105,7 @@ with c1:
   <span class="open-hint">→ Open Analyzer</span>
 </div>
 """, unsafe_allow_html=True)
+    st.page_link("pages/01_Tabular.py", label="Open Tabular Analyzer", icon="📊", use_container_width=True)
 
 with c2:
     st.markdown("""
@@ -126,6 +127,7 @@ with c2:
   <span class="open-hint">→ Open Analyzer</span>
 </div>
 """, unsafe_allow_html=True)
+    st.page_link("pages/02_Time_Series.py", label="Open Time Series Analyzer", icon="📈", use_container_width=True)
 
 with c3:
     st.markdown("""
@@ -147,6 +149,7 @@ with c3:
   <span class="open-hint">→ Open Analyzer</span>
 </div>
 """, unsafe_allow_html=True)
+    st.page_link("pages/03_Images.py", label="Open Image Analyzer", icon="🖼️", use_container_width=True)
 
 st.divider()
 
