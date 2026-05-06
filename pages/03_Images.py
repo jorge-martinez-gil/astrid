@@ -70,6 +70,7 @@ try:
 except Exception:
     HAS_UTILS = False
     DEFAULT_WEIGHTS = {"quality": 35, "security": 25, "reliability": 20, "robustness": 10, "fairness": 10}
+from audit_history import build_audit_record, evaluate_policy, save_audit_record
 
 st.set_page_config(page_title="Image Dataset Trustworthiness Analyzer (Experimental)", page_icon="🔬", layout="wide")
 
@@ -2601,6 +2602,45 @@ grade = scoring["grade"]
 prop_scores = scoring["scores"]
 score_details = scoring["details"]
 
+audit_config = {
+    "mode": cfg.mode,
+    "preset": preset_name,
+    "thresholds": to_json_safe({k: getattr(cfg.thresholds, k) for k in cfg.thresholds.__dataclass_fields__}),
+    "columns": {
+        "path_col": cfg.path_col,
+        "label_col": cfg.label_col,
+        "split_col": cfg.split_col,
+        "time_col": cfg.time_col,
+        "group_cols": list(cfg.group_cols or []),
+        "id_cols": list(cfg.id_cols or []),
+        "source_cols": list(cfg.source_cols or []),
+    },
+    "sampling": {
+        "max_images": int(cfg.max_images),
+        "sample_for_perceptual_dups": int(cfg.sample_for_perceptual_dups),
+        "sample_for_exif": int(cfg.sample_for_exif),
+        "random_state": int(cfg.random_state),
+    },
+}
+audit_record = build_audit_record(
+    analyzer="images",
+    dataset_name=zip_up.name or "images.zip",
+    file_sha256=sha256_bytes(zip_bytes),
+    report=safe_report,
+    score=total_score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+    config=audit_config,
+    score_components=score_details,
+)
+policy_result = evaluate_policy(audit_record)
+try:
+    audit_saved_path = save_audit_record(audit_record)
+except OSError:
+    audit_saved_path = None
+
 # Verdict card
 st.markdown(f"""
 <div class="verdict-card">
@@ -2617,6 +2657,7 @@ st.markdown(f"""
       {badge(verdict, kind)}
       {badge(f"Score {total_score}/100", 'ok' if total_score>=80 else ('warn' if total_score>=60 else 'bad'))}
       {badge(f"Grade {grade}", 'ok' if grade in ('A','B') else ('warn' if grade=='C' else 'bad'))}
+      {badge(f"Gate {policy_result['status']}", 'ok' if policy_result['status']=='PASS' else 'bad')}
     </div>
   </div>
   <hr>
@@ -2628,6 +2669,10 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+if audit_saved_path:
+    st.caption(f"Audit history saved: {audit_saved_path}")
+else:
+    st.warning("Audit history could not be saved for this run.")
 
 # KPI row
 c1, c2, c3, c4, c5 = st.columns(5, gap="large")

@@ -29,7 +29,8 @@ st.sidebar.markdown(
     "📊 &nbsp;<b>Tabular</b> — CSV / Parquet / Excel<br>"
     "📈 &nbsp;<b>Time Series</b> — Temporal datasets<br>"
     "🖼 &nbsp;<b>Images</b> — ZIP of image files<br>"
-    "🔬 &nbsp;<b>Drift</b> — Experimental drift engine"
+    "🔬 &nbsp;<b>Drift</b> — Experimental drift engine<br>"
+    "🧭 &nbsp;<b>Audit History</b> — Compare runs and policy gates"
     "</div>",
     unsafe_allow_html=True,
 )
@@ -152,6 +153,7 @@ with c3:
     st.page_link("pages/03_Images.py", label="Open Image Analyzer", icon="🖼️", use_container_width=True)
 
 st.divider()
+st.page_link("pages/05_Audit_History.py", label="Open Audit History", icon="🧭", use_container_width=True)
 
 # ── How it works ───────────────────────────────────────────────────────────────
 st.markdown("""

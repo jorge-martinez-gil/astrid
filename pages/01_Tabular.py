@@ -12,6 +12,7 @@ from utils import (
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
     to_datetime_if_possible, DEFAULT_WEIGHTS
 )
+from audit_history import build_audit_record, evaluate_policy, save_audit_record
 
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -958,6 +959,25 @@ cfg_dict = {
 # Verdict banner
 # ──────────────────────────────────────────────────────────────────────────────
 
+audit_record = build_audit_record(
+    analyzer="tabular",
+    dataset_name=file_name,
+    file_sha256=sha256_bytes(file_bytes),
+    report=safe_report,
+    score=score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+    config=cfg_dict,
+    score_components=score_components,
+)
+policy_result = evaluate_policy(audit_record)
+try:
+    audit_saved_path = save_audit_record(audit_record)
+except OSError:
+    audit_saved_path = None
+
 pii_cols = report["security"]["confidentiality_pii_heuristics"]["columns_with_hits"]
 
 st.markdown(f"""
@@ -975,6 +995,7 @@ st.markdown(f"""
       {badge(verdict, vkind)}
       {badge(f"Score {score}/100", 'ok' if score>=80 else ('warn' if score>=60 else 'bad'))}
       {badge(f"Grade {grade}", 'ok' if grade in ('A','B') else ('warn' if grade=='C' else 'bad'))}
+      {badge(f"Gate {policy_result['status']}", 'ok' if policy_result['status']=='PASS' else 'bad')}
     </div>
   </div>
   <hr>
@@ -994,6 +1015,10 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+if audit_saved_path:
+    st.caption(f"Audit history saved: {audit_saved_path}")
+else:
+    st.warning("Audit history could not be saved for this run.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPI row
