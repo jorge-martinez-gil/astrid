@@ -195,7 +195,7 @@ st.markdown("""
     <strong>ASTRID</strong> — Advanced Software Tools for the Reliability of Industrial Datasets
   </div>
   <div>
-    © 2024 <a href="https://github.com/jorge-martinez-gil" target="_blank">Jorge Martinez-Gil</a>
+    © 2026 <a href="https://github.com/jorge-martinez-gil" target="_blank">Jorge Martinez-Gil</a>
     &nbsp;·&nbsp;
     <a href="https://github.com/jorge-martinez-gil/astrid" target="_blank">GitHub Repository</a>
     &nbsp;·&nbsp;
