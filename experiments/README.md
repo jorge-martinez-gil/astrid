@@ -20,6 +20,7 @@ Useful options:
 ```bash
 python experiments/fault_injection_tabular.py \
   --rows 8000 \
+  --seeds 7,11,19,23,31 \
   --severities 0,0.01,0.05,0.10,0.20,0.40 \
   --save-reports
 ```
@@ -27,8 +28,10 @@ python experiments/fault_injection_tabular.py \
 Generated outputs are written to:
 
 - `experiments/results/tabular_fault_injection/tabular_fault_injection_summary.csv`
+- `experiments/results/tabular_fault_injection/tabular_fault_injection_aggregate.csv`
 - `experiments/results/tabular_fault_injection/tabular_fault_injection_results.json`
 - `experiments/results/tabular_fault_injection/reports/*.json` when `--save-reports` is set
+- `experiments/results/tabular_fault_injection/figures/*` for generated paper figures
 
 The generated `results/` directory is ignored by git so repeated runs do not
 pollute the repository. Archive selected outputs separately when preparing a
@@ -47,6 +50,9 @@ The initial runner covers six controlled tabular failure modes:
 
 For each run, the summary records the ASTRID score, grade, policy-gate status,
 primary metric value, detection flag, recommendation coverage flag, and runtime.
+When multiple seeds are supplied, the aggregate CSV reports mean/std scores,
+mean/std primary metrics, detection rate, policy-failure rate, recommendation
+coverage rate, and mean runtime for each fault/severity pair.
 
 ## Paper Use
 

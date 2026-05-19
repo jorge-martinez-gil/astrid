@@ -7,6 +7,7 @@ API, and writes paper-ready summary tables.
 from __future__ import annotations
 
 import argparse
+from html import escape
 import json
 from pathlib import Path
 import sys
@@ -458,9 +459,205 @@ def _plot_heatmap(
     return str(path)
 
 
+def _color_for_rate(value: float) -> str:
+    value = max(0.0, min(1.0, float(value)))
+    low = np.array([237, 248, 251])
+    high = np.array([44, 127, 184])
+    rgb = (low + (high - low) * value).astype(int)
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def _svg_line_chart(agg: pd.DataFrame, figures_dir: Path) -> str:
+    width, height = 900, 560
+    left, right, top, bottom = 82, 190, 46, 68
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    severities = sorted(agg["severity"].unique())
+    x_min, x_max = min(severities), max(severities)
+    colors = {
+        "missingness": "#1f77b4",
+        "duplicates": "#ff7f0e",
+        "split_leakage": "#2ca02c",
+        "drift": "#d62728",
+        "pii": "#9467bd",
+        "fairness": "#8c564b",
+    }
+
+    def sx(value: float) -> float:
+        if x_max == x_min:
+            return left + plot_w / 2
+        return left + (float(value) - x_min) / (x_max - x_min) * plot_w
+
+    def sy(value: float) -> float:
+        return top + (100.0 - float(value)) / 100.0 * plot_h
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        "<style>text{font-family:Arial,sans-serif;fill:#1f2933}.title{font-size:20px;font-weight:700}.label{font-size:13px}.tick{font-size:11px;fill:#4b5563}.legend{font-size:12px}</style>",
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text class="title" x="{width / 2}" y="25" text-anchor="middle">ASTRID Health Score Under Injected Tabular Faults</text>',
+    ]
+    for y in range(0, 101, 20):
+        yy = sy(y)
+        parts.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{left + plot_w}" y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
+        parts.append(f'<text class="tick" x="{left - 12}" y="{yy + 4:.1f}" text-anchor="end">{y}</text>')
+    for severity in severities:
+        xx = sx(severity)
+        parts.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top + plot_h}" stroke="#f3f4f6" stroke-width="1"/>')
+        parts.append(f'<text class="tick" x="{xx:.1f}" y="{top + plot_h + 22}" text-anchor="middle">{severity:g}</text>')
+    parts.append(f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#111827" stroke-width="1.3"/>')
+    parts.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#111827" stroke-width="1.3"/>')
+    parts.append(f'<text class="label" x="{left + plot_w / 2}" y="{height - 18}" text-anchor="middle">Injected fault severity</text>')
+    parts.append(f'<text class="label" x="18" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 18 {top + plot_h / 2})">Mean health score</text>')
+
+    for legend_i, fault in enumerate(_ordered_faults(agg["fault_type"].unique())):
+        subset = agg[agg["fault_type"] == fault].sort_values("severity")
+        points = " ".join(f'{sx(row.severity):.1f},{sy(row.score_mean):.1f}' for row in subset.itertuples())
+        color = colors.get(fault, "#374151")
+        parts.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.4"/>')
+        for row in subset.itertuples():
+            parts.append(f'<circle cx="{sx(row.severity):.1f}" cy="{sy(row.score_mean):.1f}" r="3.5" fill="{color}"/>')
+        ly = top + 18 + legend_i * 22
+        lx = left + plot_w + 24
+        parts.append(f'<line x1="{lx}" y1="{ly}" x2="{lx + 18}" y2="{ly}" stroke="{color}" stroke-width="2.5"/>')
+        parts.append(f'<text class="legend" x="{lx + 26}" y="{ly + 4}">{escape(fault)}</text>')
+    parts.append("</svg>")
+    path = figures_dir / "score_vs_severity.svg"
+    path.write_text("\n".join(parts), encoding="utf-8")
+    return str(path)
+
+
+def _svg_primary_metric_chart(agg: pd.DataFrame, figures_dir: Path) -> str:
+    width, height = 980, 680
+    panel_w, panel_h = 290, 210
+    x_gap, y_gap = 34, 54
+    left, top = 70, 60
+    faults = _ordered_faults(agg["fault_type"].unique())
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        "<style>text{font-family:Arial,sans-serif;fill:#1f2933}.title{font-size:20px;font-weight:700}.small{font-size:11px;fill:#4b5563}.panel{font-size:13px;font-weight:700}</style>",
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text class="title" x="{width / 2}" y="26" text-anchor="middle">Primary Metric Response Under Controlled Fault Injection</text>',
+    ]
+    for idx, fault in enumerate(faults):
+        col, row = idx % 3, idx // 3
+        x0 = left + col * (panel_w + x_gap)
+        y0 = top + row * (panel_h + y_gap)
+        subset = agg[agg["fault_type"] == fault].sort_values("severity")
+        severities = subset["severity"].tolist()
+        values = subset["primary_metric_value_mean"].tolist()
+        metric = str(subset["primary_metric"].iloc[0])
+        x_min, x_max = min(severities), max(severities)
+        y_min, y_max = min(values), max(values)
+        y_pad = max((y_max - y_min) * 0.08, 0.01)
+        y_min, y_max = max(0.0, y_min - y_pad), y_max + y_pad
+
+        def sx(value: float) -> float:
+            if x_max == x_min:
+                return x0 + panel_w / 2
+            return x0 + (float(value) - x_min) / (x_max - x_min) * panel_w
+
+        def sy(value: float) -> float:
+            if y_max == y_min:
+                return y0 + panel_h / 2
+            return y0 + (y_max - float(value)) / (y_max - y_min) * panel_h
+
+        parts.append(f'<text class="panel" x="{x0}" y="{y0 - 12}">{escape(fault)}</text>')
+        parts.append(f'<rect x="{x0}" y="{y0}" width="{panel_w}" height="{panel_h}" fill="#ffffff" stroke="#d1d5db"/>')
+        for frac in [0, 0.25, 0.5, 0.75, 1]:
+            yy = y0 + panel_h * frac
+            parts.append(f'<line x1="{x0}" y1="{yy:.1f}" x2="{x0 + panel_w}" y2="{yy:.1f}" stroke="#f3f4f6"/>')
+        points = " ".join(f"{sx(s):.1f},{sy(v):.1f}" for s, v in zip(severities, values))
+        parts.append(f'<polyline points="{points}" fill="none" stroke="#1f77b4" stroke-width="2.3"/>')
+        for s, v in zip(severities, values):
+            parts.append(f'<circle cx="{sx(s):.1f}" cy="{sy(v):.1f}" r="3.2" fill="#1f77b4"/>')
+        parts.append(f'<text class="small" x="{x0}" y="{y0 + panel_h + 18}">{escape(metric)}</text>')
+        parts.append(f'<text class="small" x="{x0 + panel_w}" y="{y0 + panel_h + 18}" text-anchor="end">severity</text>')
+    parts.append("</svg>")
+    path = figures_dir / "primary_metric_vs_severity.svg"
+    path.write_text("\n".join(parts), encoding="utf-8")
+    return str(path)
+
+
+def _svg_heatmap(
+    agg: pd.DataFrame,
+    figures_dir: Path,
+    *,
+    value_col: str,
+    title: str,
+    file_name: str,
+) -> str:
+    faults = _ordered_faults(agg["fault_type"].unique())
+    severities = sorted(agg["severity"].unique())
+    pivot = (
+        agg.pivot(index="fault_type", columns="severity", values=value_col)
+        .reindex(index=faults, columns=severities)
+        .fillna(0.0)
+    )
+    cell_w, cell_h = 78, 38
+    left, top = 150, 62
+    width = left + len(severities) * cell_w + 42
+    height = top + len(faults) * cell_h + 42
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        "<style>text{font-family:Arial,sans-serif;fill:#1f2933}.title{font-size:18px;font-weight:700}.tick{font-size:12px}.cell{font-size:11px;font-weight:700}</style>",
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text class="title" x="{width / 2}" y="26" text-anchor="middle">{escape(title)}</text>',
+    ]
+    for j, severity in enumerate(severities):
+        x = left + j * cell_w + cell_w / 2
+        parts.append(f'<text class="tick" x="{x:.1f}" y="{top - 16}" text-anchor="middle">{severity:g}</text>')
+    for i, fault in enumerate(faults):
+        y = top + i * cell_h + cell_h / 2
+        parts.append(f'<text class="tick" x="{left - 12}" y="{y + 4:.1f}" text-anchor="end">{escape(fault)}</text>')
+        for j, severity in enumerate(severities):
+            value = float(pivot.loc[fault, severity])
+            x0 = left + j * cell_w
+            y0 = top + i * cell_h
+            fill = _color_for_rate(value)
+            text_color = "#ffffff" if value >= 0.55 else "#111827"
+            parts.append(f'<rect x="{x0}" y="{y0}" width="{cell_w}" height="{cell_h}" fill="{fill}" stroke="#ffffff"/>')
+            parts.append(f'<text class="cell" x="{x0 + cell_w / 2:.1f}" y="{y0 + cell_h / 2 + 4:.1f}" text-anchor="middle" fill="{text_color}">{value:.2f}</text>')
+    parts.append("</svg>")
+    path = figures_dir / file_name
+    path.write_text("\n".join(parts), encoding="utf-8")
+    return str(path)
+
+
+def _generate_svg_figures(df: pd.DataFrame, out_dir: Path) -> Dict[str, Any]:
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    agg = aggregate_rows(df)
+    return {
+        "score_vs_severity": _svg_line_chart(agg, figures_dir),
+        "primary_metric_vs_severity": _svg_primary_metric_chart(agg, figures_dir),
+        "detection_heatmap": _svg_heatmap(
+            agg,
+            figures_dir,
+            value_col="detected_rate",
+            title="Detection Rate by Fault Type and Severity",
+            file_name="detection_heatmap.svg",
+        ),
+        "recommendation_heatmap": _svg_heatmap(
+            agg,
+            figures_dir,
+            value_col="recommendation_rate",
+            title="Recommendation Coverage by Fault Type and Severity",
+            file_name="recommendation_heatmap.svg",
+        ),
+        "policy_gate_heatmap": _svg_heatmap(
+            agg,
+            figures_dir,
+            value_col="policy_fail_rate",
+            title="Policy Gate Failure Rate by Fault Type and Severity",
+            file_name="policy_gate_heatmap.svg",
+        ),
+    }
+
+
 def generate_figures(df: pd.DataFrame, out_dir: Path) -> Dict[str, Any]:
     if not PLOT_OK:
-        return {"figures_error": "matplotlib is not available"}
+        return _generate_svg_figures(df, out_dir)
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     agg = aggregate_rows(df)
@@ -528,7 +725,12 @@ def write_outputs(rows: List[Dict[str, Any]], out_dir: Path, metadata: Dict[str,
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, default=4000, help="Rows in the clean synthetic dataset.")
-    parser.add_argument("--seed", type=int, default=7, help="Base random seed.")
+    parser.add_argument("--seed", type=int, default=7, help="Base random seed used when --seeds is omitted.")
+    parser.add_argument(
+        "--seeds",
+        default=None,
+        help="Optional comma-separated seed list for repeated runs, e.g. 7,11,19.",
+    )
     parser.add_argument(
         "--faults",
         nargs="+",
@@ -570,12 +772,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     severities = parse_float_list(args.severities)
+    seeds = parse_int_list(args.seeds) if args.seeds else [int(args.seed)]
     reports_dir = args.out_dir / "reports"
-    rows = run_fault_grid(
+    rows = run_multi_seed_fault_grid(
         n_rows=args.rows,
         faults=args.faults,
         severities=severities,
-        seed=args.seed,
+        seeds=seeds,
         preset=args.preset,
         mode=args.mode,
         save_reports=args.save_reports,
@@ -585,6 +788,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "experiment": "tabular_fault_injection",
         "rows_requested": args.rows,
         "seed": args.seed,
+        "seeds": seeds,
         "faults": args.faults,
         "severities": severities,
         "preset": args.preset,
