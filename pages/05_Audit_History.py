@@ -11,6 +11,8 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from audit_history import (  # noqa: E402
     DEFAULT_POLICY,
+    POLICY_PRESETS,
+    POLICY_PRESET_DESCRIPTIONS,
     compare_reports,
     evaluate_policy,
     load_audit_runs,
@@ -62,20 +64,27 @@ if not runs:
 
 with st.sidebar:
     st.header("Policy Gate")
-    st.caption("Adjust the default deployment gate for this review.")
+    st.caption("Choose a gate profile, then edit its thresholds for this review.")
+    policy_preset_name = st.selectbox(
+        "Gate preset",
+        list(POLICY_PRESETS.keys()),
+        index=list(POLICY_PRESETS.keys()).index("Balanced (default)"),
+    )
+    policy_defaults = POLICY_PRESETS.get(policy_preset_name, DEFAULT_POLICY)
+    st.caption(POLICY_PRESET_DESCRIPTIONS.get(policy_preset_name, ""))
     policy = {
         "min_health_score": st.number_input(
             "Minimum health score",
             min_value=0,
             max_value=100,
-            value=int(DEFAULT_POLICY["min_health_score"]),
+            value=int(policy_defaults["min_health_score"]),
             step=1,
         ),
         "max_missingness": st.number_input(
             "Max missingness",
             min_value=0.0,
             max_value=1.0,
-            value=float(DEFAULT_POLICY["max_missingness"]),
+            value=float(policy_defaults["max_missingness"]),
             step=0.01,
             format="%.3f",
         ),
@@ -83,7 +92,7 @@ with st.sidebar:
             "Max duplicate rate",
             min_value=0.0,
             max_value=1.0,
-            value=float(DEFAULT_POLICY["max_duplicate_rate"]),
+            value=float(policy_defaults["max_duplicate_rate"]),
             step=0.01,
             format="%.3f",
         ),
@@ -91,7 +100,7 @@ with st.sidebar:
             "Max split leakage",
             min_value=0.0,
             max_value=1.0,
-            value=float(DEFAULT_POLICY["max_split_leakage"]),
+            value=float(policy_defaults["max_split_leakage"]),
             step=0.001,
             format="%.4f",
         ),
@@ -99,7 +108,7 @@ with st.sidebar:
             "Max drift KS",
             min_value=0.0,
             max_value=1.0,
-            value=float(DEFAULT_POLICY["max_drift_ks"]),
+            value=float(policy_defaults["max_drift_ks"]),
             step=0.01,
             format="%.3f",
         ),
@@ -107,11 +116,11 @@ with st.sidebar:
             "Max positive-rate disparity",
             min_value=0.0,
             max_value=1.0,
-            value=float(DEFAULT_POLICY["max_positive_rate_disparity"]),
+            value=float(policy_defaults["max_positive_rate_disparity"]),
             step=0.01,
             format="%.3f",
         ),
-        "allow_pii": st.toggle("Allow PII flags", value=bool(DEFAULT_POLICY["allow_pii"])),
+        "allow_pii": st.toggle("Allow PII flags", value=bool(policy_defaults["allow_pii"])),
     }
 
 summary_df = pd.DataFrame([summarize_run(run) for run in runs])

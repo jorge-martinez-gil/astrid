@@ -24,6 +24,44 @@ DEFAULT_POLICY: Dict[str, Any] = {
     "max_positive_rate_disparity": 0.20,
 }
 
+POLICY_PRESETS: Dict[str, Dict[str, Any]] = {
+    "Strict production": {
+        "min_health_score": 90,
+        "max_missingness": 0.02,
+        "max_duplicate_rate": 0.005,
+        "allow_pii": False,
+        "max_split_leakage": 0.0,
+        "max_drift_ks": 0.20,
+        "max_positive_rate_disparity": 0.10,
+    },
+    "Balanced (default)": dict(DEFAULT_POLICY),
+    "Lenient development": {
+        "min_health_score": 70,
+        "max_missingness": 0.10,
+        "max_duplicate_rate": 0.05,
+        "allow_pii": False,
+        "max_split_leakage": 0.0,
+        "max_drift_ks": 0.45,
+        "max_positive_rate_disparity": 0.35,
+    },
+    "Exploratory research": {
+        "min_health_score": 60,
+        "max_missingness": 0.20,
+        "max_duplicate_rate": 0.10,
+        "allow_pii": True,
+        "max_split_leakage": 0.01,
+        "max_drift_ks": 0.60,
+        "max_positive_rate_disparity": 0.50,
+    },
+}
+
+POLICY_PRESET_DESCRIPTIONS: Dict[str, str] = {
+    "Strict production": "Release gate for high-risk or regulated datasets.",
+    "Balanced (default)": "Default gate used by ASTRID reports and experiments.",
+    "Lenient development": "Development gate that relaxes noisy quality and drift checks while keeping PII and leakage strict.",
+    "Exploratory research": "Research-only gate for stress tests and demos; not recommended for deployment decisions.",
+}
+
 
 def _json_safe(obj: Any) -> Any:
     if isinstance(obj, dict):

@@ -2,6 +2,7 @@ from pathlib import Path
 import shutil
 
 from audit_history import (
+    POLICY_PRESETS,
     build_audit_record,
     compare_reports,
     evaluate_policy,
@@ -83,6 +84,22 @@ def test_policy_gate_fails_risky_record():
     assert "Positive-rate disparity" in failed_names
 
 
+def test_policy_gate_can_be_relaxed_with_preset():
+    record = _record(
+        _report(
+            missingness=0.08,
+            duplicate_rate=0.03,
+            drift=0.40,
+            positive_rate_disparity=0.30,
+        ),
+        score=72,
+        grade="C",
+    )
+
+    assert evaluate_policy(record)["status"] == "FAIL"
+    assert evaluate_policy(record, policy=POLICY_PRESETS["Lenient development"])["status"] == "PASS"
+
+
 def test_save_and_load_audit_records_round_trip():
     tmp = Path.cwd() / ".audit_history_test_runs"
     if tmp.exists():
@@ -115,5 +132,6 @@ def test_compare_reports_marks_lower_risk_metrics_as_improved():
 if __name__ == "__main__":
     test_policy_gate_passes_clean_record()
     test_policy_gate_fails_risky_record()
+    test_policy_gate_can_be_relaxed_with_preset()
     test_save_and_load_audit_records_round_trip()
     test_compare_reports_marks_lower_risk_metrics_as_improved()

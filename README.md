@@ -29,13 +29,14 @@
 7. [Customising Metric Weights](#customising-metric-weights)
 8. [Analyzers Reference](#analyzers-reference)
 9. [Health Score & Grading](#health-score--grading)
-10. [Configuration Reference](#configuration-reference)
-11. [Exporting Results](#exporting-results)
-12. [Standards Alignment](#standards-alignment)
-13. [Contributing](#contributing)
-14. [License](#license)
-15. [Citation](#citation)
-16. [Acknowledgements](#acknowledgements)
+10. [Policy Gate Presets](#policy-gate-presets)
+11. [Configuration Reference](#configuration-reference)
+12. [Exporting Results](#exporting-results)
+13. [Standards Alignment](#standards-alignment)
+14. [Contributing](#contributing)
+15. [License](#license)
+16. [Citation](#citation)
+17. [Acknowledgements](#acknowledgements)
 
 ---
 
@@ -146,11 +147,12 @@ The application opens automatically in your default browser at `http://localhost
 1. Navigate to **Tabular Analyzer** or **Time Series Analyzer** from the home page.
 2. Upload your dataset file (CSV, Parquet, or Excel).
 3. In the sidebar, select a **threshold preset** (Balanced / Strict / Lenient) and configure column roles (label, split, time, group).
-4. Optionally expand **⚖️ Score Weights** to adjust dimension contributions (see [Customising Metric Weights](#customising-metric-weights)).
-5. Click **🔬 Run analysis**.
-6. Read the **Verdict** card at the top—it summarises the overall finding, lists the key issues, and shows recommended actions.
-7. Explore the dimension tabs (Quality, Security, Reliability, Robustness, Fairness, Transparency, Security) for detailed metric values and evidence.
-8. Switch to the **Export** tab and click **⬇ Download HTML** to save a self-contained report.
+4. Optionally expand **Policy Gate** to choose or edit the pass/fail gate used for this run.
+5. Optionally expand **⚖️ Score Weights** to adjust dimension contributions (see [Customising Metric Weights](#customising-metric-weights)).
+6. Click **🔬 Run analysis**.
+7. Read the **Verdict** card at the top—it summarises the overall finding, lists the key issues, and shows recommended actions.
+8. Explore the dimension tabs (Quality, Security, Reliability, Robustness, Fairness, Transparency, Security) for detailed metric values and evidence.
+9. Switch to the **Export** tab and click **⬇ Download HTML** to save a self-contained report.
 
 ### Image datasets
 
@@ -314,11 +316,27 @@ The score breakdown bars on the Overview tab show each dimension's contribution 
 
 ---
 
+## Policy Gate Presets
+
+The policy gate controls the final PASS/FAIL decision. It is separate from the health score and can be relaxed or tightened for different review contexts.
+
+| Preset | Intended use |
+|--------|--------------|
+| **Strict production** | Release gate for high-risk or regulated datasets |
+| **Balanced (default)** | Default gate used by ASTRID reports and experiments |
+| **Lenient development** | Development gate that relaxes quality and drift limits while keeping PII and leakage strict |
+| **Exploratory research** | Research-only gate for stress tests and demos; not recommended for deployment decisions |
+
+The Tabular Analyzer applies the selected gate to fresh runs and stores it in the audit record. The Audit History page can re-review saved runs under any preset or custom thresholds.
+
+---
+
 ## Configuration Reference
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | **Threshold preset** | Selects Balanced, Strict, or Lenient threshold profiles for all checks simultaneously | Balanced |
+| **Policy gate preset** | Selects Strict production, Balanced, Lenient development, or Exploratory research pass/fail gates | Balanced |
 | **Drift KS threshold** | KS statistic above which numeric distribution shift is flagged | 0.30 (Balanced) |
 | **PII hit-rate threshold** | Regex hit-rate above which a text column is flagged as potentially containing PII | 0.01 (Balanced) |
 | **Label column** | Column containing the prediction target; used for leakage and fairness checks | Auto-detected |
