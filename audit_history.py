@@ -21,6 +21,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
     "allow_pii": False,
     "max_split_leakage": 0.0,
     "max_drift_ks": 0.30,
+    "max_positive_rate_disparity": 0.20,
 }
 
 
@@ -94,6 +95,17 @@ def _metric_snapshot(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
 
     pii_hits = _get_path(report, ["security", "confidentiality_pii_heuristics", "columns_with_hits"])
     pii_count = float(len(pii_hits)) if isinstance(pii_hits, dict) else None
+    fairness_checks = _get_path(report, ["fairness", "group_checks"])
+    fairness_values: List[float] = []
+    if isinstance(fairness_checks, dict):
+        for stats in fairness_checks.values():
+            if not isinstance(stats, dict):
+                continue
+            for key in ("positive_rate_disparity", "max_label_parity_gap"):
+                value = _as_float(stats.get(key))
+                if value is not None:
+                    fairness_values.append(value)
+    max_positive_rate_disparity = max(fairness_values, default=None)
 
     return {
         "missingness": _as_float(
@@ -109,6 +121,7 @@ def _metric_snapshot(report: Dict[str, Any]) -> Dict[str, Optional[float]]:
             _as_float(_get_path(report, ["quality", "cross_split_leakage", "cross_split_leakage_rate"])),
         ),
         "max_drift_ks": max_drift,
+        "max_positive_rate_disparity": max_positive_rate_disparity,
         "pii_flag_count": pii_count,
         "corrupt_rate": _as_float(_get_path(report, ["quality", "readability", "corrupt_rate"])),
     }
@@ -190,6 +203,7 @@ def summarize_run(record: Dict[str, Any]) -> Dict[str, Any]:
         "duplicate_rate": metrics.get("duplicate_rate"),
         "split_leakage": metrics.get("split_leakage"),
         "max_drift_ks": metrics.get("max_drift_ks"),
+        "max_positive_rate_disparity": metrics.get("max_positive_rate_disparity"),
         "pii_flag_count": metrics.get("pii_flag_count"),
         "run_id": record.get("run_id"),
     }
@@ -261,6 +275,15 @@ def evaluate_policy(
         if metrics.get("max_drift_ks") is None
         else float(metrics["max_drift_ks"]) <= float(policy["max_drift_ks"]),
     )
+    add_check(
+        "Positive-rate disparity",
+        metrics.get("max_positive_rate_disparity"),
+        f"<= {policy['max_positive_rate_disparity']}",
+        None
+        if metrics.get("max_positive_rate_disparity") is None
+        else float(metrics["max_positive_rate_disparity"])
+        <= float(policy["max_positive_rate_disparity"]),
+    )
     pii_count = metrics.get("pii_flag_count")
     add_check(
         "PII flags",
@@ -287,6 +310,7 @@ def compare_reports(base: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str
         "duplicate_rate": "Duplicate rate",
         "split_leakage": "Split leakage",
         "max_drift_ks": "Max drift KS",
+        "max_positive_rate_disparity": "Positive-rate disparity",
         "pii_flag_count": "PII flag count",
         "corrupt_rate": "Corrupt image rate",
     }

@@ -103,6 +103,14 @@ with st.sidebar:
             step=0.01,
             format="%.3f",
         ),
+        "max_positive_rate_disparity": st.number_input(
+            "Max positive-rate disparity",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(DEFAULT_POLICY["max_positive_rate_disparity"]),
+            step=0.01,
+            format="%.3f",
+        ),
         "allow_pii": st.toggle("Allow PII flags", value=bool(DEFAULT_POLICY["allow_pii"])),
     }
 
@@ -200,4 +208,3 @@ with tab_export:
         use_container_width=True,
     )
     st.markdown("</div>", unsafe_allow_html=True)
-

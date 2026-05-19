@@ -10,7 +10,14 @@ from audit_history import (
 )
 
 
-def _report(missingness=0.0, duplicate_rate=0.0, leakage=0.0, drift=0.0, pii=False):
+def _report(
+    missingness=0.0,
+    duplicate_rate=0.0,
+    leakage=0.0,
+    drift=0.0,
+    pii=False,
+    positive_rate_disparity=0.0,
+):
     return {
         "quality": {
             "missingness": {"overall_missing_rate": missingness},
@@ -23,6 +30,11 @@ def _report(missingness=0.0, duplicate_rate=0.0, leakage=0.0, drift=0.0, pii=Fal
             }
         },
         "reliability": {"numeric_drift_ks_first_last": {"top_10_ks": {"sensor": drift}}},
+        "fairness": {
+            "group_checks": {
+                "site": {"positive_rate_disparity": positive_rate_disparity}
+            }
+        },
     }
 
 
@@ -51,7 +63,14 @@ def test_policy_gate_passes_clean_record():
 def test_policy_gate_fails_risky_record():
     result = evaluate_policy(
         _record(
-            _report(missingness=0.20, duplicate_rate=0.05, leakage=0.01, drift=0.60, pii=True),
+            _report(
+                missingness=0.20,
+                duplicate_rate=0.05,
+                leakage=0.01,
+                drift=0.60,
+                pii=True,
+                positive_rate_disparity=0.50,
+            ),
             score=40,
             grade="F",
         )
@@ -61,6 +80,7 @@ def test_policy_gate_fails_risky_record():
     assert result["status"] == "FAIL"
     assert "Health score" in failed_names
     assert "PII flags" in failed_names
+    assert "Positive-rate disparity" in failed_names
 
 
 def test_save_and_load_audit_records_round_trip():

@@ -16,6 +16,17 @@ from typing import Any, Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    PLOT_OK = True
+except Exception:  # pragma: no cover - optional plotting dependency
+    plt = None
+    PLOT_OK = False
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -260,7 +271,7 @@ def run_fault_grid(
                 corrupted,
                 config=config,
                 dataset_bytes=dataframe_to_bytes(corrupted),
-                dataset_name=f"synthetic_{fault_type}_{severity:.3f}.csv",
+                dataset_name=f"synthetic_seed{seed}_{fault_type}_{severity:.3f}.csv",
                 preset=preset,
                 mode=mode,
                 use_auto_columns=False,
@@ -268,6 +279,7 @@ def run_fault_grid(
             runtime_s = time.perf_counter() - start
             primary = extract_primary_metric(result, fault_type)
             row = {
+                "seed": int(seed),
                 "fault_type": fault_type,
                 "severity": float(severity),
                 "n_rows": int(len(corrupted)),
@@ -285,7 +297,7 @@ def run_fault_grid(
 
             if save_reports:
                 reports_dir.mkdir(parents=True, exist_ok=True)
-                report_path = reports_dir / f"{fault_type}_{severity:.3f}.json"
+                report_path = reports_dir / f"seed{seed}_{fault_type}_{severity:.3f}.json"
                 report_path.write_text(
                     json.dumps(to_json_safe(result), indent=2, ensure_ascii=False),
                     encoding="utf-8",
@@ -294,20 +306,223 @@ def run_fault_grid(
     return rows
 
 
+def run_multi_seed_fault_grid(
+    *,
+    n_rows: int,
+    faults: Iterable[str],
+    severities: Iterable[float],
+    seeds: Iterable[int],
+    preset: str,
+    mode: str,
+    save_reports: bool,
+    reports_dir: Path,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for seed in seeds:
+        rows.extend(
+            run_fault_grid(
+                n_rows=n_rows,
+                faults=faults,
+                severities=severities,
+                seed=int(seed),
+                preset=preset,
+                mode=mode,
+                save_reports=save_reports,
+                reports_dir=reports_dir,
+            )
+        )
+    return rows
+
+
 def parse_float_list(value: str) -> List[float]:
     return [float(part.strip()) for part in value.split(",") if part.strip()]
 
 
+def parse_int_list(value: str) -> List[int]:
+    return [int(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def aggregate_rows(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    work["policy_failed"] = work["policy_status"].eq("FAIL")
+    agg = (
+        work.groupby(["fault_type", "severity", "primary_metric"], as_index=False)
+        .agg(
+            score_mean=("score", "mean"),
+            score_std=("score", "std"),
+            primary_metric_value_mean=("primary_metric_value", "mean"),
+            primary_metric_value_std=("primary_metric_value", "std"),
+            detected_rate=("detected", "mean"),
+            recommendation_rate=("recommendation_hit", "mean"),
+            policy_fail_rate=("policy_failed", "mean"),
+            runtime_s_mean=("runtime_s", "mean"),
+        )
+        .sort_values(["fault_type", "severity"])
+    )
+    return agg.fillna(0.0)
+
+
+def _ordered_faults(values: Iterable[str]) -> List[str]:
+    present = set(values)
+    ordered = [fault for fault in DEFAULT_FAULTS if fault in present]
+    ordered.extend(sorted(present - set(ordered)))
+    return ordered
+
+
+def _plot_score_lines(agg: pd.DataFrame, figures_dir: Path) -> str:
+    assert plt is not None
+    fig, ax = plt.subplots(figsize=(8.5, 5.2))
+    for fault in _ordered_faults(agg["fault_type"].unique()):
+        subset = agg[agg["fault_type"] == fault].sort_values("severity")
+        ax.plot(subset["severity"], subset["score_mean"], marker="o", linewidth=2, label=fault)
+        if "score_std" in subset:
+            lo = subset["score_mean"] - subset["score_std"]
+            hi = subset["score_mean"] + subset["score_std"]
+            ax.fill_between(subset["severity"], lo, hi, alpha=0.12)
+    ax.set_title("ASTRID Health Score Under Injected Tabular Faults")
+    ax.set_xlabel("Injected fault severity")
+    ax.set_ylabel("Mean health score")
+    ax.set_ylim(0, 100)
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+    path = figures_dir / "score_vs_severity.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return str(path)
+
+
+def _plot_primary_metric_lines(agg: pd.DataFrame, figures_dir: Path) -> str:
+    assert plt is not None
+    faults = _ordered_faults(agg["fault_type"].unique())
+    fig, axes = plt.subplots(2, 3, figsize=(11, 6.6), sharex=True)
+    axes_flat = axes.ravel()
+    for ax, fault in zip(axes_flat, faults):
+        subset = agg[agg["fault_type"] == fault].sort_values("severity")
+        metric = subset["primary_metric"].iloc[0]
+        ax.plot(
+            subset["severity"],
+            subset["primary_metric_value_mean"],
+            marker="o",
+            linewidth=2,
+            color="#1f77b4",
+        )
+        lo = subset["primary_metric_value_mean"] - subset["primary_metric_value_std"]
+        hi = subset["primary_metric_value_mean"] + subset["primary_metric_value_std"]
+        ax.fill_between(subset["severity"], lo, hi, alpha=0.12, color="#1f77b4")
+        ax.set_title(fault)
+        ax.set_ylabel(metric)
+        ax.grid(True, alpha=0.25)
+    for ax in axes_flat[len(faults) :]:
+        ax.axis("off")
+    fig.supxlabel("Injected fault severity")
+    fig.suptitle("Primary Metric Response Under Controlled Fault Injection", y=1.02)
+    fig.tight_layout()
+    path = figures_dir / "primary_metric_vs_severity.png"
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return str(path)
+
+
+def _plot_heatmap(
+    agg: pd.DataFrame,
+    figures_dir: Path,
+    *,
+    value_col: str,
+    title: str,
+    file_name: str,
+) -> str:
+    assert plt is not None
+    faults = _ordered_faults(agg["fault_type"].unique())
+    severities = sorted(agg["severity"].unique())
+    pivot = (
+        agg.pivot(index="fault_type", columns="severity", values=value_col)
+        .reindex(index=faults, columns=severities)
+        .fillna(0.0)
+    )
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    image = ax.imshow(pivot.to_numpy(dtype=float), vmin=0, vmax=1, cmap="viridis")
+    ax.set_xticks(range(len(severities)), [f"{v:g}" for v in severities])
+    ax.set_yticks(range(len(faults)), faults)
+    ax.set_xlabel("Injected fault severity")
+    ax.set_title(title)
+    for i in range(len(faults)):
+        for j in range(len(severities)):
+            value = pivot.iloc[i, j]
+            ax.text(j, i, f"{value:.2f}", ha="center", va="center", color="white", fontsize=8)
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    path = figures_dir / file_name
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return str(path)
+
+
+def generate_figures(df: pd.DataFrame, out_dir: Path) -> Dict[str, Any]:
+    if not PLOT_OK:
+        return {"figures_error": "matplotlib is not available"}
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    agg = aggregate_rows(df)
+    paths = {
+        "score_vs_severity": _plot_score_lines(agg, figures_dir),
+        "primary_metric_vs_severity": _plot_primary_metric_lines(agg, figures_dir),
+        "detection_heatmap": _plot_heatmap(
+            agg,
+            figures_dir,
+            value_col="detected_rate",
+            title="Detection Rate by Fault Type and Severity",
+            file_name="detection_heatmap.png",
+        ),
+        "recommendation_heatmap": _plot_heatmap(
+            agg,
+            figures_dir,
+            value_col="recommendation_rate",
+            title="Recommendation Coverage by Fault Type and Severity",
+            file_name="recommendation_heatmap.png",
+        ),
+        "policy_gate_heatmap": _plot_heatmap(
+            agg,
+            figures_dir,
+            value_col="policy_fail_rate",
+            title="Policy Gate Failure Rate by Fault Type and Severity",
+            file_name="policy_gate_heatmap.png",
+        ),
+    }
+    return paths
+
+
 def write_outputs(rows: List[Dict[str, Any]], out_dir: Path, metadata: Dict[str, Any]) -> Dict[str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    summary_df = pd.DataFrame(rows)
+    aggregate_df = aggregate_rows(summary_df)
     summary_csv = out_dir / "tabular_fault_injection_summary.csv"
+    aggregate_csv = out_dir / "tabular_fault_injection_aggregate.csv"
     results_json = out_dir / "tabular_fault_injection_results.json"
-    pd.DataFrame(rows).to_csv(summary_csv, index=False)
+    summary_df.to_csv(summary_csv, index=False)
+    aggregate_df.to_csv(aggregate_csv, index=False)
+    figures = generate_figures(summary_df, out_dir)
     results_json.write_text(
-        json.dumps(to_json_safe({"metadata": metadata, "results": rows}), indent=2, ensure_ascii=False),
+        json.dumps(
+            to_json_safe(
+                {
+                    "metadata": metadata,
+                    "results": rows,
+                    "aggregate": aggregate_df.to_dict(orient="records"),
+                    "figures": figures,
+                }
+            ),
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
-    return {"summary_csv": str(summary_csv), "results_json": str(results_json)}
+    return {
+        "summary_csv": str(summary_csv),
+        "aggregate_csv": str(aggregate_csv),
+        "results_json": str(results_json),
+        **{key: str(value) for key, value in figures.items()},
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
