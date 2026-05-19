@@ -248,3 +248,8 @@ The current repository is promising, but the paper will need stronger evidence b
 4. Create a `paper/` directory with LaTeX source, figures, tables, and experiment scripts.
 5. Run the first controlled tabular experiment and use it as the seed result for the paper.
 
+Seed implementation note:
+
+- `astrid_core.py` now exposes a headless tabular analyzer API.
+- `experiments/fault_injection_tabular.py` runs the first controlled tabular fault-injection benchmark.
+- `experiments/README.md` documents how to generate summary CSV/JSON outputs for paper figures.

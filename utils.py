@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+try:
+    import streamlit as st
+except Exception:  # pragma: no cover - enables headless experiment imports
+    st = None
 
 # ─────────────────────────────────────────────
 # CSS — shared design system
