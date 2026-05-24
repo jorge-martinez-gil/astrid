@@ -490,18 +490,23 @@ def assess_tabular_fairness(df: pd.DataFrame, cfg: TabularAssessConfig) -> Dict[
             "max_group_share": float(shares.max()) if len(shares) else None,
             "representation_share_top10": shares.sort_values(ascending=False).head(10).to_dict(),
         }
-        missingness_disparity: Dict[str, float] = {}
-        for c in df.columns:
-            missing_by_group = df.groupby(group_col)[c].apply(lambda series: series.isna().mean())
-            if missing_by_group.shape[0] >= 2:
-                missingness_disparity[c] = float(missing_by_group.max() - missing_by_group.min())
-        stats["missingness_disparity_top10"] = dict(
-            sorted(missingness_disparity.items(), key=lambda kv: kv[1], reverse=True)[:10]
-        )
+        # Vectorized: compute missingness per (group, column) with a single
+        # groupby on the full isna() frame instead of one apply per column.
+        missing_by_group = df.isna().groupby(df[group_col], dropna=False).mean()
+        if missing_by_group.shape[0] >= 2:
+            disparities = (missing_by_group.max() - missing_by_group.min()).sort_values(ascending=False)
+            stats["missingness_disparity_top10"] = {
+                str(col): float(val) for col, val in disparities.head(10).items()
+            }
+        else:
+            stats["missingness_disparity_top10"] = {}
         if label_ok:
-            stats["label_missingness_by_group"] = (
-                df.groupby(group_col)[cfg.label_col].apply(lambda series: series.isna().mean()).to_dict()
-            )
+            if cfg.label_col in missing_by_group.columns:
+                stats["label_missingness_by_group"] = {
+                    str(k): float(v) for k, v in missing_by_group[cfg.label_col].items()
+                }
+            else:
+                stats["label_missingness_by_group"] = {}
             y = df[cfg.label_col]
             if y.dropna().nunique() == 2:
                 tmp = df.copy()
@@ -765,8 +770,17 @@ __all__ = [
     "analyze_tabular_dataframe",
     "analyze_tabular_file",
     "assess_tabular_all",
+    "assess_tabular_quality",
+    "assess_tabular_reliability",
+    "assess_tabular_robustness",
+    "assess_tabular_fairness",
+    "assess_tabular_security",
     "build_tabular_recommendations",
+    "dataframe_to_bytes",
+    "detect_tabular_task_type",
     "guess_tabular_columns",
     "make_tabular_config",
     "read_tabular_file",
+    "tabular_config_to_dict",
+    "tabular_verdict",
 ]

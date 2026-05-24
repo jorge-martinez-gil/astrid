@@ -328,16 +328,54 @@ def approx_iqr_outlier_rate(x: pd.Series) -> Optional[float]:
     return float(((x < lo) | (x > hi)).mean())
 
 
+try:  # SciPy is preferred (faster, returns p-value, handles ties)
+    from scipy.stats import ks_2samp as _scipy_ks_2samp  # type: ignore
+    _SCIPY_KS_OK = True
+except Exception:  # pragma: no cover - optional dependency
+    _scipy_ks_2samp = None  # type: ignore
+    _SCIPY_KS_OK = False
+
+
 def ks_statistic(x1: np.ndarray, x2: np.ndarray) -> Optional[float]:
+    """Two-sample Kolmogorov–Smirnov statistic.
+
+    Uses ``scipy.stats.ks_2samp`` when available (faster, more accurate on ties);
+    falls back to a NumPy implementation when SciPy is not installed.
+    """
+    x1 = np.asarray(x1, dtype=float)
+    x2 = np.asarray(x2, dtype=float)
     x1 = x1[~np.isnan(x1)]
     x2 = x2[~np.isnan(x2)]
     if len(x1) < 20 or len(x2) < 20:
         return None
+    if _SCIPY_KS_OK:
+        try:
+            return float(_scipy_ks_2samp(x1, x2).statistic)
+        except Exception:
+            pass  # fall through to numpy implementation
     x1, x2 = np.sort(x1), np.sort(x2)
     all_vals = np.sort(np.unique(np.concatenate([x1, x2])))
     cdf1 = np.searchsorted(x1, all_vals, side="right") / len(x1)
     cdf2 = np.searchsorted(x2, all_vals, side="right") / len(x2)
     return float(np.max(np.abs(cdf1 - cdf2)))
+
+
+def ks_statistic_with_pvalue(x1: np.ndarray, x2: np.ndarray) -> Optional[Tuple[float, Optional[float]]]:
+    """Return (statistic, p_value) for two-sample KS. p_value is None without SciPy."""
+    x1 = np.asarray(x1, dtype=float)
+    x2 = np.asarray(x2, dtype=float)
+    x1 = x1[~np.isnan(x1)]
+    x2 = x2[~np.isnan(x2)]
+    if len(x1) < 20 or len(x2) < 20:
+        return None
+    if _SCIPY_KS_OK:
+        try:
+            res = _scipy_ks_2samp(x1, x2)
+            return float(res.statistic), float(res.pvalue)
+        except Exception:
+            pass
+    stat = ks_statistic(x1, x2)
+    return (stat, None) if stat is not None else None
 
 
 # ─────────────────────────────────────────────
@@ -480,10 +518,33 @@ def compute_health_score(
         q_scores.append(0.0 if float(leak) > 0 else 1.0)
     components["quality"] = (sum(q_scores) / len(q_scores)) * norm_w.get("quality", 35)
 
-    # Security
+    # Security — graduated by worst PII hit rate observed across columns.
+    # Previously a single hit (even a regex false-positive) zeroed the
+    # dimension. Now: 0% hit → full credit; >= PII_SEVERE_HIT_RATE → 0;
+    # linear in between. This avoids cliff effects from noisy heuristics
+    # while still penalising any real signal proportionally.
     s = report.get("security", {})
     pii_hits = s.get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
-    components["security"] = 0.0 if pii_hits else norm_w.get("security", 25)
+    PII_SEVERE_HIT_RATE = 0.05  # 5%+ of sampled rows match a PII pattern → full penalty
+    if not pii_hits:
+        s_score = 1.0
+    else:
+        worst_rate = 0.0
+        for col_hits in pii_hits.values():
+            if isinstance(col_hits, dict):
+                for v in col_hits.values():
+                    try:
+                        worst_rate = max(worst_rate, float(v))
+                    except (TypeError, ValueError):
+                        # nested dicts or unexpected shapes — treat as severe
+                        worst_rate = max(worst_rate, PII_SEVERE_HIT_RATE)
+            else:
+                try:
+                    worst_rate = max(worst_rate, float(col_hits))
+                except (TypeError, ValueError):
+                    worst_rate = max(worst_rate, PII_SEVERE_HIT_RATE)
+        s_score = max(0.0, 1.0 - worst_rate / PII_SEVERE_HIT_RATE)
+    components["security"] = s_score * norm_w.get("security", 25)
 
     # Reliability
     r = report.get("reliability", {})
@@ -722,25 +783,96 @@ def render_transparency_tab(df: pd.DataFrame, file_name: str, file_bytes: bytes,
 # HTML Export
 # ─────────────────────────────────────────────
 
-def build_html_report(df: pd.DataFrame, report: Dict[str, Any], cfg_dict: Dict[str, Any],
-                      file_name: str, file_bytes: bytes, verdict: str, reasons: List[str],
-                      recs: List[str], score: int, grade: str) -> str:
+def build_markdown_report(df, report, cfg_dict, file_name, file_bytes,
+                           verdict, reasons, recs, score, grade):
+    """Build a portable Markdown report — suitable for archiving in git, PR comments, or wikis."""
+    sha = sha256_bytes(file_bytes)
+    miss_rate = report["quality"]["missingness"]["overall_missing_rate"]
+    dup_rate = report["quality"]["duplicates"]["exact_duplicate_row_rate"]
+    pii_cols = report.get("security", {}).get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
+    drift = report.get("reliability", {}).get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
+    miss_top = report["quality"]["missingness"]["top_10_columns_missing_rate"]
+
+    lines = []
+    lines.append(f"# Dataset Safety Report — {file_name}\n")
+    lines.append(f"**Rows × Columns:** {df.shape[0]:,} × {df.shape[1]:,}  ")
+    lines.append(f"**Mode:** {cfg_dict.get('mode','—')}  ")
+    lines.append(f"**Preset:** {cfg_dict.get('preset','—')}\n")
+    lines.append(f"## Overall\n")
+    lines.append(f"- **Score:** {score} / 100 — Grade **{grade}**")
+    lines.append(f"- **Verdict:** {verdict}")
+    lines.append(f"- **Missingness:** {miss_rate:.2%}")
+    lines.append(f"- **Duplicates:** {dup_rate:.2%}\n")
+
+    if reasons:
+        lines.append("## Findings\n")
+        for r in reasons:
+            lines.append(f"- {r}")
+        lines.append("")
+
+    if recs:
+        lines.append("## Recommended Actions\n")
+        for r in recs:
+            lines.append(f"- {r}")
+        lines.append("")
+
+    if miss_top:
+        lines.append("## Missingness — Top Columns\n")
+        lines.append("| Column | Missing Rate |")
+        lines.append("| --- | ---: |")
+        for col, val in miss_top.items():
+            lines.append(f"| {col} | {val:.2%} |")
+        lines.append("")
+
+    if drift:
+        thr = cfg_dict.get("drift_ks_threshold", 0.3)
+        lines.append("## Numeric Drift (KS, first vs last slice)\n")
+        lines.append("| Column | KS Statistic | Status |")
+        lines.append("| --- | ---: | --- |")
+        for col, val in drift.items():
+            if val is None:
+                continue
+            status = "Above threshold" if float(val) > thr else "OK"
+            lines.append(f"| {col} | {float(val):.4f} | {status} |")
+        lines.append("")
+
+    if pii_cols:
+        lines.append("## PII Findings\n")
+        lines.append("| Column | Pattern | Hit Rate |")
+        lines.append("| --- | --- | ---: |")
+        for col, hits in pii_cols.items():
+            if isinstance(hits, dict):
+                for pattern, rate in hits.items():
+                    try:
+                        lines.append(f"| {col} | {pattern} | {float(rate):.2%} |")
+                    except (TypeError, ValueError):
+                        lines.append(f"| {col} | {pattern} | {rate} |")
+        lines.append("")
+
+    lines.append("## Integrity\n")
+    lines.append(f"- **SHA-256:** `{sha}`\n")
+    lines.append("---\n*Generated by ASTRID — heuristic report. Validate with domain and legal review.*\n")
+    return "\n".join(lines)
+
+
+def build_html_report(df, report, cfg_dict, file_name, file_bytes,
+                       verdict, reasons, recs, score, grade):
     """Generate a standalone HTML report."""
     sha = sha256_bytes(file_bytes)
     pii_cols = report["security"]["confidentiality_pii_heuristics"].get("columns_with_hits", {})
     miss_rate = report["quality"]["missingness"]["overall_missing_rate"]
-    dup_rate  = report["quality"]["duplicates"]["exact_duplicate_row_rate"]
+    dup_rate = report["quality"]["duplicates"]["exact_duplicate_row_rate"]
 
     score_color = "#22c55e" if score >= 80 else ("#f59e0b" if score >= 60 else "#ef4444")
-
     reasons_html = "".join(f"<li>{r}</li>" for r in reasons)
-    recs_html    = "".join(f"<li>{r}</li>" for r in recs)
+    recs_html = "".join(f"<li>{r}</li>" for r in recs)
 
     drift = report.get("reliability", {}).get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
+    thr = cfg_dict.get("drift_ks_threshold", 0.3)
     drift_rows = "".join(
-        f"<tr><td>{col}</td><td>{val:.4f}</td>"
-        f"<td style='color:{'#f59e0b' if float(val) > cfg_dict.get('drift_ks_threshold', 0.3) else '#22c55e'}'>"
-        f"{'Above threshold' if float(val) > cfg_dict.get('drift_ks_threshold', 0.3) else 'OK'}</td></tr>"
+        f"<tr><td>{col}</td><td>{float(val):.4f}</td>"
+        f"<td style='color:{('#f59e0b' if float(val) > thr else '#22c55e')}'>"
+        f"{('Above threshold' if float(val) > thr else 'OK')}</td></tr>"
         for col, val in drift.items() if val is not None
     )
 
@@ -749,78 +881,60 @@ def build_html_report(df: pd.DataFrame, report: Dict[str, Any], cfg_dict: Dict[s
 
     pii_rows = ""
     for col, hits in pii_cols.items():
-        for pattern, rate in hits.items():
-            pii_rows += f"<tr><td>{col}</td><td>{pattern}</td><td>{rate:.2%}</td></tr>"
+        if isinstance(hits, dict):
+            for pattern, rate in hits.items():
+                try:
+                    pii_rows += f"<tr><td>{col}</td><td>{pattern}</td><td>{float(rate):.2%}</td></tr>"
+                except (TypeError, ValueError):
+                    pii_rows += f"<tr><td>{col}</td><td>{pattern}</td><td>{rate}</td></tr>"
+
+    drift_section = (f"<h2>Numeric Drift (KS)</h2><table><tr><th>Column</th><th>KS Statistic</th><th>Status</th></tr>{drift_rows}</table>" if drift_rows else "")
+    pii_section = (f"<h2>PII Findings</h2><table><tr><th>Column</th><th>Pattern</th><th>Hit Rate</th></tr>{pii_rows}</table>" if pii_rows else "")
 
     return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
+<html lang="en"><head><meta charset="UTF-8">
 <title>Dataset Safety Report — {file_name}</title>
 <style>
-  body {{ font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 0; background: #0f1117; color: #e2e8f0; }}
-  .container {{ max-width: 1100px; margin: 0 auto; padding: 40px 24px; }}
-  h1 {{ font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; }}
-  h2 {{ font-size: 1.1rem; font-weight: 700; letter-spacing: -0.01em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 8px; margin-top: 32px; }}
-  .meta {{ color: #94a3b8; font-size: 0.85rem; margin-bottom: 32px; }}
-  .score-ring {{ display: inline-flex; align-items: center; gap: 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 20px 28px; margin-bottom: 24px; }}
-  .score-num {{ font-size: 3rem; font-weight: 900; color: {score_color}; line-height: 1; }}
-  .score-label {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; }}
-  .verdict {{ font-size: 1.1rem; font-weight: 700; }}
-  .kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }}
-  .kpi {{ background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 14px 16px; }}
-  .kpi-t {{ font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; }}
-  .kpi-v {{ font-size: 1.5rem; font-weight: 800; margin: 4px 0; }}
-  ul {{ padding-left: 1.2em; }}
-  li {{ margin: 6px 0; line-height: 1.5; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 12px; }}
-  th {{ background: rgba(255,255,255,0.06); padding: 8px 12px; text-align: left; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.07em; color: #94a3b8; }}
-  td {{ padding: 7px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }}
-  .ok {{ color: #22c55e; }} .warn {{ color: #f59e0b; }} .bad {{ color: #ef4444; }}
-  .sha {{ font-family: monospace; font-size: 0.75rem; word-break: break-all; color: #64748b; }}
-  footer {{ margin-top: 48px; color: #475569; font-size: 0.78rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 16px; }}
-</style>
-</head>
-<body>
+body {{ font-family: 'Segoe UI', system-ui, sans-serif; margin:0; padding:0; background:#0f1117; color:#e2e8f0; }}
+.container {{ max-width: 1100px; margin:0 auto; padding: 40px 24px; }}
+h1 {{ font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; }}
+h2 {{ font-size: 1.1rem; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 8px; margin-top: 32px; }}
+.meta {{ color: #94a3b8; font-size: 0.85rem; margin-bottom: 32px; }}
+.score-ring {{ display:inline-flex; align-items:center; gap:16px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:16px; padding:20px 28px; margin-bottom:24px; }}
+.score-num {{ font-size: 3rem; font-weight: 900; color: {score_color}; line-height:1; }}
+.score-label {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color:#94a3b8; }}
+.verdict {{ font-size: 1.1rem; font-weight: 700; }}
+.kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }}
+.kpi {{ background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 14px 16px; }}
+.kpi-t {{ font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color:#94a3b8; }}
+.kpi-v {{ font-size: 1.5rem; font-weight: 800; margin: 4px 0; }}
+ul {{ padding-left: 1.2em; }}
+li {{ margin: 6px 0; line-height: 1.5; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 12px; }}
+th {{ background: rgba(255,255,255,0.06); padding: 8px 12px; text-align: left; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.07em; color:#94a3b8; }}
+td {{ padding: 7px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }}
+.ok {{ color: #22c55e; }} .warn {{ color: #f59e0b; }} .bad {{ color: #ef4444; }}
+.sha {{ font-family: monospace; font-size: 0.75rem; word-break: break-all; color: #64748b; }}
+footer {{ margin-top: 48px; color: #475569; font-size: 0.78rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 16px; }}
+</style></head><body>
 <div class="container">
-  <h1>Dataset Safety Report</h1>
-  <div class="meta">File: <strong>{file_name}</strong> &nbsp;·&nbsp; {df.shape[0]:,} rows × {df.shape[1]:,} columns &nbsp;·&nbsp; Mode: {cfg_dict.get('mode','—')} &nbsp;·&nbsp; Preset: {cfg_dict.get('preset','—')}</div>
-
-  <div class="score-ring">
-    <div>
-      <div class="score-num">{score}</div>
-      <div style="color:{score_color};font-weight:700;font-size:0.9rem;">Grade {grade}</div>
-    </div>
-    <div>
-      <div class="score-label">Overall verdict</div>
-      <div class="verdict">{verdict}</div>
-    </div>
-  </div>
-
-  <div class="kpis">
-    <div class="kpi"><div class="kpi-t">Rows</div><div class="kpi-v">{df.shape[0]:,}</div></div>
-    <div class="kpi"><div class="kpi-t">Columns</div><div class="kpi-v">{df.shape[1]:,}</div></div>
-    <div class="kpi"><div class="kpi-t">Missingness</div><div class="kpi-v {'warn' if miss_rate > 0.05 else 'ok'}">{miss_rate:.2%}</div></div>
-    <div class="kpi"><div class="kpi-t">Duplicates</div><div class="kpi-v {'warn' if dup_rate > 0.01 else 'ok'}">{dup_rate:.2%}</div></div>
-  </div>
-
-  <h2>Findings</h2>
-  <ul>{reasons_html}</ul>
-
-  <h2>Recommended Actions</h2>
-  <ul>{recs_html}</ul>
-
-  <h2>Missingness — Top Columns</h2>
-  <table><tr><th>Column</th><th>Missing Rate</th></tr>{miss_rows}</table>
-
-  {"<h2>Numeric Drift (KS)</h2><table><tr><th>Column</th><th>KS Statistic</th><th>Status</th></tr>" + drift_rows + "</table>" if drift_rows else ""}
-
-  {"<h2>PII Findings</h2><table><tr><th>Column</th><th>Pattern</th><th>Hit Rate</th></tr>" + pii_rows + "</table>" if pii_rows else ""}
-
-  <h2>Integrity</h2>
-  <div class="sha">SHA-256: {sha}</div>
-
-  <footer>Generated by Unified Dataset Safety Analyzer &nbsp;·&nbsp; Heuristic report — validate with domain and legal review.</footer>
+<h1>Dataset Safety Report</h1>
+<div class="meta">File: <strong>{file_name}</strong> &nbsp;·&nbsp; {df.shape[0]:,} rows × {df.shape[1]:,} columns &nbsp;·&nbsp; Mode: {cfg_dict.get('mode','—')} &nbsp;·&nbsp; Preset: {cfg_dict.get('preset','—')}</div>
+<div class="score-ring">
+  <div><div class="score-num">{score}</div><div style="color:{score_color};font-weight:700;font-size:0.9rem;">Grade {grade}</div></div>
+  <div><div class="score-label">Overall verdict</div><div class="verdict">{verdict}</div></div>
 </div>
-</body>
-</html>"""
+<div class="kpis">
+<div class="kpi"><div class="kpi-t">Rows</div><div class="kpi-v">{df.shape[0]:,}</div></div>
+<div class="kpi"><div class="kpi-t">Columns</div><div class="kpi-v">{df.shape[1]:,}</div></div>
+<div class="kpi"><div class="kpi-t">Missingness</div><div class="kpi-v {('warn' if miss_rate>0.05 else 'ok')}">{miss_rate:.2%}</div></div>
+<div class="kpi"><div class="kpi-t">Duplicates</div><div class="kpi-v {('warn' if dup_rate>0.01 else 'ok')}">{dup_rate:.2%}</div></div>
+</div>
+<h2>Findings</h2><ul>{reasons_html}</ul>
+<h2>Recommended Actions</h2><ul>{recs_html}</ul>
+<h2>Missingness — Top Columns</h2><table><tr><th>Column</th><th>Missing Rate</th></tr>{miss_rows}</table>
+{drift_section}
+{pii_section}
+<h2>Integrity</h2><div class="sha">SHA-256: {sha}</div>
+<footer>Generated by ASTRID — heuristic report. Validate with domain and legal review.</footer>
+</div></body></html>"""

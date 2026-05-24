@@ -204,11 +204,26 @@ def numeric_cols(df: pd.DataFrame, exclude: Optional[List[str]] = None) -> List[
     return [c for c in df.columns
             if c not in exclude_set and pd.api.types.is_numeric_dtype(df[c].dtype)]
 
+try:  # SciPy is preferred when available
+    from scipy.stats import ks_2samp as _scipy_ks_2samp  # type: ignore
+    _SCIPY_KS_OK = True
+except Exception:  # pragma: no cover - optional dependency
+    _scipy_ks_2samp = None  # type: ignore
+    _SCIPY_KS_OK = False
+
+
 def ks_statistic(x1: np.ndarray, x2: np.ndarray) -> Optional[float]:
+    x1 = np.asarray(x1, dtype=float)
+    x2 = np.asarray(x2, dtype=float)
     x1 = x1[~np.isnan(x1)]
     x2 = x2[~np.isnan(x2)]
     if len(x1) < 30 or len(x2) < 30:
         return None
+    if _SCIPY_KS_OK:
+        try:
+            return float(_scipy_ks_2samp(x1, x2).statistic)
+        except Exception:
+            pass
     x1 = np.sort(x1)
     x2 = np.sort(x2)
     all_vals = np.sort(np.unique(np.concatenate([x1, x2])))
@@ -930,8 +945,12 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
         if len(parts) >= 2:
             folder_labels[n] = parts[-2]
 
-    for n in img_names:
-        data = zf.read(n)
+    # Process each image: PIL decode, hashing, feature extraction, EXIF, phash.
+    # PIL releases the GIL during JPEG/PNG decoding and hashlib releases it
+    # during digest, so a thread pool gives a real speedup on multi-core
+    # machines. zipfile is NOT thread-safe, so reads happen on the main thread
+    # and the per-image CPU work is dispatched to workers.
+    def _process_one(n: str, data: bytes) -> Dict[str, Any]:
         row: Dict[str, Any] = {
             "path_in_zip": n,
             "filename": os.path.basename(n),
@@ -939,24 +958,18 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
             "sha256": sha256_bytes(data),
             "file_ext": os.path.splitext(n)[1].lower(),
         }
-
-        # Folder label
         if n in folder_labels:
             row["folder_label"] = folder_labels[n]
-
         img, err = safe_open_image(data)
         if img is None:
             row["open_ok"] = False
             row["open_error"] = err
             row.update({c: None for c in EXIF_COLUMNS})
             row["phash"] = None
-            rows.append(row)
-            continue
-
+            return row
         row["open_ok"] = True
         row["open_error"] = None
         row.update(image_features(img))
-
         if n in sample_exif:
             ex = exif_flags(img)
             for c in EXIF_COLUMNS:
@@ -964,13 +977,46 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
             row.update(ex)
         else:
             row.update({c: None for c in EXIF_COLUMNS})
-
         if IMAGEHASH_OK and n in sample_phash:
             row["phash"] = perceptual_hash(img)
         else:
             row["phash"] = None
+        return row
 
-        rows.append(row)
+    # Read bytes serially (zipfile not thread-safe), process in parallel.
+    # Use bounded prefetch so memory stays in check on huge ZIPs.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    max_workers = max(2, min(8, (os.cpu_count() or 4)))
+    # Preserve input order for deterministic output
+    rows_by_idx: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {}
+        # Stream in batches so we don't hold all image bytes in RAM at once.
+        batch_size = max(16, max_workers * 4)
+        for batch_start in range(0, len(img_names), batch_size):
+            batch = img_names[batch_start:batch_start + batch_size]
+            batch_futures = []
+            for offset, n in enumerate(batch):
+                try:
+                    data = zf.read(n)
+                except Exception as exc:
+                    rows_by_idx[batch_start + offset] = {
+                        "path_in_zip": n,
+                        "filename": os.path.basename(n),
+                        "byte_size": 0,
+                        "sha256": None,
+                        "file_ext": os.path.splitext(n)[1].lower(),
+                        "open_ok": False,
+                        "open_error": f"read_failed: {exc}",
+                        "phash": None,
+                        **{c: None for c in EXIF_COLUMNS},
+                    }
+                    continue
+                fut = pool.submit(_process_one, n, data)
+                batch_futures.append((batch_start + offset, fut))
+            for idx, fut in batch_futures:
+                rows_by_idx[idx] = fut.result()
+    rows = [rows_by_idx[i] for i in sorted(rows_by_idx.keys())]
 
     img_df = pd.DataFrame(rows)
     for c in EXIF_COLUMNS + ["phash"]:
@@ -2220,23 +2266,33 @@ def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig, weights: Op
     }
 
     if weights is not None:
-        # Apply user-defined weights for the 5 standard dimensions.
-        # Transparency keeps its fixed 8-point contribution; the remaining
-        # 92 points are distributed proportionally across the 5 main dims.
+        # Apply user-defined weights. Transparency is now also user-configurable:
+        # if a "transparency" weight is provided, it overrides the fixed 8-point
+        # allocation. Otherwise transparency keeps its 8-point default and the
+        # remaining 92 points are split across the 5 main dims.
         main_dims = ["quality", "security", "reliability", "robustness", "fairness"]
+        transp_weight = weights.get("transparency")
+        if transp_weight is not None and float(transp_weight) > 0:
+            # User-configured transparency budget (in 0–100 weight space)
+            total_w = sum(float(weights.get(d, base_max.get(d, 0))) for d in main_dims) + float(transp_weight)
+            if total_w <= 0:
+                total_w = 1.0
+            transp_max = float(transp_weight) / total_w * 100.0
+        else:
+            transp_max = base_max["transparency"]
+        remaining = 100.0 - transp_max
         w_sum = sum(weights.get(d, base_max.get(d, 0)) for d in main_dims)
         if w_sum <= 0:
             w_sum = 1.0
-        transp_max = base_max["transparency"]
-        remaining = 100.0 - transp_max
         max_possible: Dict[str, float] = {"transparency": transp_max}
         for dim in main_dims:
             fraction = scores[dim] / base_max[dim] if base_max[dim] > 0 else 0.0
             norm_w = weights.get(dim, base_max.get(dim, 0)) / w_sum * remaining
             scores[dim] = fraction * norm_w
             max_possible[dim] = norm_w
-        # Re-scale transparency fraction using fixed max
-        t_fraction = scores.get("transparency", 0.0) / transp_max if transp_max > 0 else 0.0
+        # Re-scale transparency fraction using the (possibly user-set) max
+        base_transp_max = base_max["transparency"]
+        t_fraction = scores.get("transparency", 0.0) / base_transp_max if base_transp_max > 0 else 0.0
         scores["transparency"] = t_fraction * transp_max
     else:
         max_possible = dict(base_max)
@@ -2385,6 +2441,29 @@ if zip_up is None:
 zip_bytes = zip_up.getvalue()
 zip_file_name = getattr(zip_up, "name", None) or "images.zip"
 
+
+# ─── Cached helpers (file parse + assess) ──────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=4)
+def _cached_read_zip(_zip_hash: str, _zip_bytes: bytes, cfg: "AssessConfig"):
+    return read_zip_images(_zip_bytes, cfg)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _cached_load_meta(_meta_hash: str, _meta_bytes: bytes, suffix: str) -> Optional[pd.DataFrame]:
+    if suffix.endswith(".csv"):
+        return pd.read_csv(io.BytesIO(_meta_bytes))
+    return pd.read_parquet(io.BytesIO(_meta_bytes))
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_assess_images(_zip_hash: str, cfg_key: str,
+                            img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame],
+                            annotation_records: List[Dict[str, Any]],
+                            cfg: "AssessConfig", _zip_bytes: bytes) -> Dict[str, Any]:
+    return assess_all(img_df, meta_joined, annotation_records, cfg, _zip_bytes)
+
+
+_zip_hash = sha256_bytes(zip_bytes)
 meta_df_raw = load_metadata_file(meta_up)
 if meta_df_raw is not None and "auto_meta_guesses_exp" not in st.session_state:
     st.session_state["auto_meta_guesses_exp"] = guess_columns_meta(meta_df_raw)
@@ -2478,12 +2557,17 @@ with st.sidebar:
 
     with st.expander("⚖️ Score Weights", expanded=False):
         st.caption("Adjust how much each dimension contributes to the overall health score. Values are normalised automatically.")
-        w_quality     = st.slider("Quality",     0, 100, DEFAULT_WEIGHTS["quality"],     step=5, key="weight_quality")
-        w_security    = st.slider("Security",    0, 100, DEFAULT_WEIGHTS["security"],    step=5, key="weight_security")
-        w_reliability = st.slider("Reliability", 0, 100, DEFAULT_WEIGHTS["reliability"], step=5, key="weight_reliability")
-        w_robustness  = st.slider("Robustness",  0, 100, DEFAULT_WEIGHTS["robustness"],  step=5, key="weight_robustness")
-        w_fairness    = st.slider("Fairness",    0, 100, DEFAULT_WEIGHTS["fairness"],     step=5, key="weight_fairness")
-        w_total = w_quality + w_security + w_reliability + w_robustness + w_fairness
+        w_quality      = st.slider("Quality",      0, 100, DEFAULT_WEIGHTS["quality"],     step=5, key="weight_quality")
+        w_security     = st.slider("Security",     0, 100, DEFAULT_WEIGHTS["security"],    step=5, key="weight_security")
+        w_reliability  = st.slider("Reliability",  0, 100, DEFAULT_WEIGHTS["reliability"], step=5, key="weight_reliability")
+        w_robustness   = st.slider("Robustness",   0, 100, DEFAULT_WEIGHTS["robustness"],  step=5, key="weight_robustness")
+        w_fairness     = st.slider("Fairness",     0, 100, DEFAULT_WEIGHTS["fairness"],    step=5, key="weight_fairness")
+        # Transparency is image-only — documentation completeness, traceability,
+        # source attribution. Default 8 mirrors the fixed allocation used
+        # historically; users can now raise/lower it.
+        w_transparency = st.slider("Transparency", 0, 100, 8,                              step=1, key="weight_transparency",
+                                    help="Image-only dimension covering documentation, traceability, and source attribution.")
+        w_total = w_quality + w_security + w_reliability + w_robustness + w_fairness + w_transparency
         if w_total == 100:
             st.success(f"✓ Sum: {w_total}")
         else:
@@ -2491,13 +2575,15 @@ with st.sidebar:
         if st.button("Reset to defaults", key="reset_weights"):
             for dim, val in DEFAULT_WEIGHTS.items():
                 st.session_state[f"weight_{dim}"] = val
+            st.session_state["weight_transparency"] = 8
 
     user_weights = {
-        "quality":     st.session_state.get("weight_quality",     DEFAULT_WEIGHTS["quality"]),
-        "security":    st.session_state.get("weight_security",    DEFAULT_WEIGHTS["security"]),
-        "reliability": st.session_state.get("weight_reliability", DEFAULT_WEIGHTS["reliability"]),
-        "robustness":  st.session_state.get("weight_robustness",  DEFAULT_WEIGHTS["robustness"]),
-        "fairness":    st.session_state.get("weight_fairness",    DEFAULT_WEIGHTS["fairness"]),
+        "quality":      st.session_state.get("weight_quality",      DEFAULT_WEIGHTS["quality"]),
+        "security":     st.session_state.get("weight_security",     DEFAULT_WEIGHTS["security"]),
+        "reliability":  st.session_state.get("weight_reliability",  DEFAULT_WEIGHTS["reliability"]),
+        "robustness":   st.session_state.get("weight_robustness",   DEFAULT_WEIGHTS["robustness"]),
+        "fairness":     st.session_state.get("weight_fairness",     DEFAULT_WEIGHTS["fairness"]),
+        "transparency": st.session_state.get("weight_transparency", 8),
     }
 
     run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -2536,7 +2622,7 @@ cfg = AssessConfig(
 )
 
 with st.spinner("Reading ZIP, scanning images and annotations..."):
-    img_df, annotation_records, ingest_warnings = read_zip_images(zip_bytes, cfg)
+    img_df, annotation_records, ingest_warnings = _cached_read_zip(_zip_hash, zip_bytes, cfg)
 
 if img_df.empty:
     st.error("No images scanned.")
@@ -2591,7 +2677,17 @@ if not run:
 # =========================
 
 with st.spinner("Running comprehensive trustworthiness checks..."):
-    report = assess_all(img_df, meta_df_joined, annotation_records, cfg, zip_bytes=zip_bytes)
+    _img_cfg_key = json.dumps({
+        "mode": cfg.mode,
+        "thresholds": {k: float(getattr(cfg.thresholds, k)) if isinstance(getattr(cfg.thresholds, k), (int, float)) else None
+                        for k in cfg.thresholds.__dataclass_fields__},
+        "random_state": int(cfg.random_state),
+        "max_images": int(cfg.max_images),
+        "sample_for_perceptual_dups": int(cfg.sample_for_perceptual_dups),
+        "sample_for_exif": int(cfg.sample_for_exif),
+    }, sort_keys=True, default=str)
+    report = _cached_assess_images(_zip_hash, _img_cfg_key, img_df,
+                                    meta_df_joined, annotation_records, cfg, zip_bytes)
 
 safe_report = to_json_safe(report)
 verdict, kind, reasons = verdict_panel(report, cfg)
@@ -3079,7 +3175,10 @@ with tab_export:
 
     st.markdown("**Metric registry**")
     st.dataframe(metric_registry_df, use_container_width=True, hide_index=True)
-    st.download_button("Download metric registry (JSON)", data=json.dumps(to_json_safe(METRIC_DOCS), indent=2), file_name="image_metric_registry.json", mime="application/json", use_container_width=True)
+    st.download_button("Download metric registry (JSON)",
+                       data=json.dumps(to_json_safe(METRIC_DOCS), indent=2),
+                       file_name="image_metric_registry.json",
+                       mime="application/json", use_container_width=True)
 
     col_e1, col_e2, col_e3 = st.columns(3, gap="large")
 
@@ -3092,18 +3191,14 @@ with tab_export:
             "metric_registry": metric_registry_df.to_dict(orient="records"),
             "metric_docs": to_json_safe(METRIC_DOCS),
         }
-        json_bytes = json.dumps(json_payload, indent=2, ensure_ascii=False).encode("utf-8")
-        st.download_button(
-            "⬇ Download JSON",
-            data=json_bytes,
-            file_name="image_trustworthiness_report.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+        st.download_button("Download JSON",
+                           data=json.dumps(json_payload, indent=2, ensure_ascii=False).encode("utf-8"),
+                           file_name="image_trustworthiness_report.json",
+                           mime="application/json", use_container_width=True)
 
     with col_e2:
         st.markdown("**Markdown summary**")
-        md_lines: List[str] = [
+        md_lines = [
             f"# Image Dataset Trustworthiness Report — {zip_file_name}",
             "",
             f"- **Mode:** {cfg.mode}",
@@ -3112,7 +3207,10 @@ with tab_export:
             f"- **Verdict:** {verdict}",
             "",
             "## Property scores",
-            *[f"- **{prop.title()}**: {prop_scores[prop]:.1f}/{scoring['max_possible'][prop]}" for prop in scoring['max_possible']],
+        ]
+        for prop in scoring["max_possible"]:
+            md_lines.append(f"- **{prop.title()}**: {prop_scores[prop]:.1f}/{scoring['max_possible'][prop]:.1f}")
+        md_lines += [
             "",
             "## Findings",
             *[f"- {r}" for r in reasons],
@@ -3123,56 +3221,33 @@ with tab_export:
             "## Key metrics",
             f"- Images scanned: {len(img_df):,}",
             f"- Annotation files: {len(annotation_records):,}",
-            f"- Readability rate: {report['quality']['readability']['readability_rate']:.4f}",
-            f"- Exact duplicate rate: {report['quality'].get('duplicates', {}).get('exact_duplicate_rate', 0.0):.4f}",
-            f"- Low-res rate: {report['quality'].get('low_resolution', {}).get('low_res_rate', 0.0):.4f}",
             f"- ZIP SHA-256: {sha256_bytes(zip_bytes)}",
-            "",
-            "## Regulatory alignment",
-            "- EU AI Act: Art. 10 (data governance), Art. 13 (transparency), Art. 15 (robustness/cybersecurity)",
-            "- Standards: ISO/IEC 5259, TR 24027, 23894, 42001, NIST AI RMF, ENISA",
             "",
             "---",
             "*Heuristic and statistical report. Validate with domain and legal review.*",
         ]
-        md_bytes = "\n".join(md_lines).encode("utf-8")
-        st.download_button(
-            "⬇ Download Markdown",
-            data=md_bytes,
-            file_name="image_trustworthiness_report.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
+        st.download_button("Download Markdown",
+                           data="\n".join(md_lines).encode("utf-8"),
+                           file_name="image_report.md",
+                           mime="text/markdown", use_container_width=True)
 
     with col_e3:
         st.markdown("**HTML report**")
-        if HAS_UTILS:
-            try:
-                report_for_html = report.copy()
-                sec0 = report_for_html.get("security", {})
-                if isinstance(sec0, dict) and "confidentiality_pii_heuristics" not in sec0:
-                    sec0["confidentiality_pii_heuristics"] = sec0.get("pii_like_in_paths", {})
-                    report_for_html["security"] = sec0
-                html_content = build_html_report(
-                    df=img_df, report=report_for_html, cfg_dict=cfg_dict,
-                    file_name=zip_file_name, file_bytes=zip_bytes,
-                    verdict=verdict, reasons=reasons, recs=recs,
-                    score=total_score, grade=grade,
-                )
-                st.download_button(
-                    "⬇ Download HTML",
-                    data=html_content.encode("utf-8"),
-                    file_name="image_trustworthiness_report.html",
-                    mime="text/html",
-                    use_container_width=True,
-                )
-            except Exception as e:
-                st.warning(f"HTML export unavailable: {e}")
-        else:
-            st.info("HTML export requires shared utils module.")
+        try:
+            html_payload = build_html_report(
+                df=img_df, report=report, cfg_dict=cfg_dict,
+                file_name=zip_file_name, file_bytes=zip_bytes,
+                verdict=verdict, reasons=reasons, recs=recs,
+                score=total_score, grade=grade,
+            )
+            st.download_button("Download HTML",
+                               data=html_payload.encode("utf-8"),
+                               file_name="image_report.html",
+                               mime="text/html", use_container_width=True)
+        except Exception as exc:
+            st.warning(f"HTML export unavailable for image reports in this build ({exc}).")
 
-    st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander("Raw JSON (preview)"):
-        st.json(json_payload)
+        st.json(safe_report)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)

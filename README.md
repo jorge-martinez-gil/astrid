@@ -101,7 +101,7 @@ Each **page module** (`01_Tabular.py`, `02_Time_Series.py`, `03_Images.py`) is s
 | **Robustness** | 10 % | Resilience to noise and edge cases | MAD-based row anomaly scoring (p99), image-feature outlier rate, condition-coverage gaps across operational subsets |
 | **Fairness** | 10 % | Equitable representation across groups | Positive-rate disparity across protected attributes, representation Jensen–Shannon divergence, label-parity gap, missingness disparity by group |
 
-> **Note:** The image analyzer additionally tracks a **Transparency** dimension (documentation completeness and traceability) within its local scoring function. This dimension is not exposed as a user-configurable weight but is included in the displayed property scores.
+> **Note:** The image analyzer additionally tracks a **Transparency** dimension (documentation completeness and traceability). On the image page it is exposed as a configurable weight in the sidebar (default 8 / 100); on the tabular and time-series analyzers it is not measured.
 
 ---
 

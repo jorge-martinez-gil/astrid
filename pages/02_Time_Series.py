@@ -9,7 +9,7 @@ from utils import (
     SHARED_CSS, to_json_safe, sha256_bytes, clip_text,
     badge, kpi, health_ring_html, progress_bar_html, check_status_card,
     compute_health_score, get_dimension_status, render_transparency_tab,
-    build_html_report, PII_PATTERNS, infer_column_types,
+    build_html_report, build_markdown_report, PII_PATTERNS, infer_column_types,
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
     DEFAULT_WEIGHTS
 )
@@ -665,11 +665,15 @@ def assess_fairness(df, cfg):
                                   "min_group_share": float(shares.min()) if len(shares) else None,
                                   "max_group_share": float(shares.max()) if len(shares) else None,
                                   "representation_share_top10": shares.sort_values(ascending=False).head(10).to_dict()}
-        miss_disp = {}
-        for c in df.columns:
-            mr = df.groupby(gcol)[c].apply(lambda s: s.isna().mean())
-            if mr.shape[0] >= 2: miss_disp[c] = float(mr.max() - mr.min())
-        stats["missingness_disparity_top10"] = dict(sorted(miss_disp.items(), key=lambda kv: kv[1], reverse=True)[:10])
+        # Vectorized: compute missingness per (group, column) in one shot
+        miss_by_group = df.isna().groupby(df[gcol], dropna=False).mean()
+        if miss_by_group.shape[0] >= 2:
+            disparities = (miss_by_group.max() - miss_by_group.min()).sort_values(ascending=False)
+            stats["missingness_disparity_top10"] = {
+                str(col): float(val) for col, val in disparities.head(10).items()
+            }
+        else:
+            stats["missingness_disparity_top10"] = {}
         if label_ok:
             y = df[cfg.label_col]
             if y.dropna().nunique() == 2:
@@ -803,17 +807,36 @@ if uploaded is None:
 file_bytes = uploaded.getvalue()
 file_name  = uploaded.name or "dataset"
 
+
+# ─── Cached helpers ───────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_read_ts(_bytes: bytes, name: str) -> Tuple[pd.DataFrame, str]:
+    if name.lower().endswith(".csv"):
+        return pd.read_csv(BytesIO(_bytes)), "CSV"
+    return pd.read_parquet(BytesIO(_bytes)), "Parquet"
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_guess_ts(df_hash: str, df: pd.DataFrame) -> Dict[str, Any]:
+    return guess_ts_columns(df)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_assess_ts(df_hash: str, df: pd.DataFrame, cfg_key: str,
+                       cfg: "AssessConfig", file_bytes: bytes) -> Dict[str, Any]:
+    return assess_all(df, cfg, file_bytes)
+
+
 try:
-    if file_name.lower().endswith(".csv"):
-        df = pd.read_csv(BytesIO(file_bytes)); detected = "CSV"
-    else:
-        df = pd.read_parquet(BytesIO(file_bytes)); detected = "Parquet"
+    df, detected = _cached_read_ts(file_bytes, file_name)
 except Exception as e:
     st.error(f"Failed to load file: {e}"); st.stop()
 
 cols = df.columns.tolist()
-if "ts_guesses" not in st.session_state:
-    st.session_state["ts_guesses"] = guess_ts_columns(df)
+_df_hash = sha256_bytes(file_bytes)
+if "ts_guesses" not in st.session_state or st.session_state.get("ts_guesses_hash") != _df_hash:
+    st.session_state["ts_guesses"] = _cached_guess_ts(_df_hash, df)
+    st.session_state["ts_guesses_hash"] = _df_hash
 
 with st.sidebar:
     st.header("⚙️ Run mode")
@@ -905,7 +928,16 @@ cfg = AssessConfig(label_col=label_col, split_col=split_col, time_col=time_col,
                    thresholds=th, mode=mode)
 
 with st.spinner("Running checks…"):
-    report = assess_all(df, cfg, file_bytes)
+    _cfg_key = json.dumps({
+        "label_col": label_col, "split_col": split_col, "time_col": time_col,
+        "entity_cols": sorted(entity_cols), "group_cols": sorted(group_cols),
+        "annotator_cols": sorted(annotator_cols), "id_cols": sorted(id_cols),
+        "time_slice_mode": time_slice_mode, "random_state": int(random_state),
+        "mode": mode, "preset": preset_name,
+        "drift_ks_threshold": th.drift_ks_threshold,
+        "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
+    }, sort_keys=True)
+    report = _cached_assess_ts(_df_hash, df, _cfg_key, cfg, file_bytes)
 
 safe_report = to_json_safe(report)
 verdict, vkind, reasons = verdict_panel(report, cfg)
@@ -1200,7 +1232,9 @@ with tab_exp:
                            file_name="ts_dataset_report.json", mime="application/json", use_container_width=True)
     with col_e2:
         st.markdown("**Markdown summary**")
-        md = f"# Time Series Dataset Report\n\n- Mode: {mode}\n- Preset: {preset_name}\n- Score: {score}/100 Grade {grade}\n- Verdict: {verdict}\n\n## Findings\n" + "\n".join(f"- {r}" for r in reasons)
+        md = build_markdown_report(df=df, report=report, cfg_dict=cfg_dict, file_name=file_name,
+                                    file_bytes=file_bytes, verdict=verdict, reasons=reasons,
+                                    recs=recs, score=score, grade=grade)
         st.download_button("⬇ Download Markdown", data=md.encode(), file_name="ts_report.md", mime="text/markdown", use_container_width=True)
     with col_e3:
         st.markdown("**HTML report**")

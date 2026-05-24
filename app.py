@@ -30,6 +30,7 @@ st.sidebar.markdown(
     "📈 &nbsp;<b>Time Series</b> — Temporal datasets<br>"
     "🖼 &nbsp;<b>Images</b> — ZIP of image files<br>"
     "🔬 &nbsp;<b>Drift</b> — Experimental drift engine<br>"
+    "🔀 &nbsp;<b>Cross-Dataset Drift</b> — Compare two files<br>"
     "🧭 &nbsp;<b>Audit History</b> — Compare runs and policy gates"
     "</div>",
     unsafe_allow_html=True,
@@ -190,6 +191,7 @@ st.markdown("""
   All checks are heuristic. Results are evidence for, not proof of, safety.
   Always validate with domain expertise and legal review before deployment.
 </div>
+
 <div class="dsa-footer">
   <div>
     <strong>ASTRID</strong> — Advanced Software Tools for the Reliability of Industrial Datasets

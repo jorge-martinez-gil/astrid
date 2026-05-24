@@ -1,3 +1,14 @@
+[project]
+name = "astrid"
+version = "1.0.0"
+description = "Advanced Software Tools for Reliable Industrial Datasets"
+requires-python = ">=3.9"
+readme = "README.md"
+license = { file = "LICENSE" }
+
+[project.scripts]
+astrid = "astrid_cli:cli_main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -10,4 +21,3 @@ target-version = "py39"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
-

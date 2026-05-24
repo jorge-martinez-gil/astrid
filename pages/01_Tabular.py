@@ -8,7 +8,7 @@ from utils import (
     SHARED_CSS, to_json_safe, sha256_bytes, clip_text,
     badge, kpi, health_ring_html, progress_bar_html, check_status_card,
     compute_health_score, get_dimension_status, render_transparency_tab,
-    build_html_report, PII_PATTERNS, infer_column_types,
+    build_html_report, build_markdown_report, PII_PATTERNS, infer_column_types,
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
     to_datetime_if_possible, DEFAULT_WEIGHTS
 )
@@ -43,16 +43,25 @@ st.markdown(SHARED_CSS, unsafe_allow_html=True)
 # Data structures
 # ──────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class Thresholds:
-    drift_ks_threshold: float
-    pii_hit_rate_threshold: float
-
-PRESETS: Dict[str, Thresholds] = {
-    "Balanced (recommended)": Thresholds(drift_ks_threshold=0.30, pii_hit_rate_threshold=0.01),
-    "Strict":                 Thresholds(drift_ks_threshold=0.20, pii_hit_rate_threshold=0.005),
-    "Lenient":                Thresholds(drift_ks_threshold=0.40, pii_hit_rate_threshold=0.02),
-}
+# Use the shared definitions from astrid_core. The page used to duplicate
+# Thresholds, PRESETS, AssessConfig and all the assess_* functions; they are
+# now imported and aliased to keep this UI file thin and ensure the headless
+# CLI and the UI run the exact same logic.
+from astrid_core import (
+    TABULAR_PRESETS as PRESETS,
+    TabularThresholds as Thresholds,
+    TabularAssessConfig as AssessConfig,
+    assess_tabular_all as _core_assess_all,
+    assess_tabular_fairness as _core_assess_fairness,  # re-exported for tests/imports
+    assess_tabular_quality as _core_assess_quality,
+    assess_tabular_reliability as _core_assess_reliability,
+    assess_tabular_robustness as _core_assess_robustness,
+    assess_tabular_security as _core_assess_security,
+    build_tabular_recommendations as _core_build_recs,
+    detect_tabular_task_type as _core_detect_task_type,
+    guess_tabular_columns as _core_guess_columns,
+    tabular_verdict as _core_tabular_verdict,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Metric documentation registry
@@ -359,441 +368,49 @@ def render_research_grade_transparency_tab(df, file_name, file_bytes, cfg_dict, 
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-@dataclass
-class AssessConfig:
-    label_col: Optional[str]
-    split_col: Optional[str]
-    time_col: Optional[str]
-    group_cols: List[str]
-    annotator_label_cols: List[str]
-    id_cols: List[str]
-    random_state: int = 7
-    max_categories_for_stats: int = 50
-    mode: str = "Quick Scan"
-    thresholds: Thresholds = field(default_factory=lambda: PRESETS["Balanced (recommended)"])
-    pii_max_rows: int = 2000
-    pii_max_text_cols: int = 10
-    rare_max_cat_cols: int = 50
-    drift_max_num_cols: int = 50
+# AssessConfig, Thresholds, PRESETS and the assess_* / guess / verdict /
+# recommendation helpers are imported from astrid_core above. These thin
+# wrappers exist so legacy call sites in this UI keep working unchanged.
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Auto-guess
-# ──────────────────────────────────────────────────────────────────────────────
+def guess_columns(df):
+    return _core_guess_columns(df)
 
-import re
 
-def _name_score(name: str, patterns: List[str]) -> float:
-    n = name.lower().strip()
-    return sum(1.0 for p in patterns if re.search(p, n))
+def detect_task_type(df, label_col):
+    return _core_detect_task_type(df, label_col)
 
-def guess_columns(df: pd.DataFrame) -> Dict[str, Any]:
-    cols = df.columns.tolist()
-    nrows = max(1, len(df))
-    nunique = {c: int(df[c].nunique(dropna=True)) for c in cols}
-    uniq_ratio = {c: float(nunique[c] / nrows) for c in cols}
-
-    dt_success: Dict[str, float] = {}
-    for c in cols[:250]:
-        if pd.api.types.is_datetime64_any_dtype(df[c].dtype):
-            dt_success[c] = 1.0
-        elif pd.api.types.is_numeric_dtype(df[c].dtype):
-            dt_success[c] = 0.0
-        else:
-            parsed = to_datetime_if_possible(df[c])
-            dt_success[c] = float(parsed.notna().mean()) if pd.api.types.is_datetime64_any_dtype(parsed.dtype) else 0.0
-
-    label_pats = [r"\blabel\b", r"\btarget\b", r"\boutcome\b", r"\bclass\b", r"\bgt\b", r"\by\b"]
-    split_pats = [r"\bsplit\b", r"\bfold\b", r"\bset\b", r"\bpartition\b"]
-    time_pats  = [r"\btime\b", r"\bdate\b", r"\btimestamp\b", r"\bcreated\b", r"\bupdated\b"]
-    id_pats    = [r"\bid\b", r"\buuid\b", r"\bguid\b", r"\buser[_\s-]?id\b", r"\bserial\b"]
-    grp_pats   = [r"\bgender\b", r"\bsex\b", r"\bage\b", r"\bregion\b", r"\bcountry\b", r"\bgroup\b"]
-
-    def rank_label(c):
-        s = _name_score(c, label_pats) * 3
-        if 2 <= nunique[c] <= min(50, int(0.01 * nrows) + 2): s += 2
-        if uniq_ratio[c] < 0.2: s += 1
-        if uniq_ratio[c] > 0.9: s -= 2
-        if dt_success.get(c, 0) > 0.8: s -= 2
-        return s
-
-    def rank_split(c):
-        s = _name_score(c, split_pats) * 3
-        if nunique[c] <= 20: s += 2
-        try:
-            vals = " ".join(df[c].dropna().astype("string").str.lower().value_counts().head(12).index)
-            if any(x in vals for x in ["train","test","val","valid","dev"]): s += 2
-        except: pass
-        if uniq_ratio[c] > 0.5: s -= 2
-        return s
-
-    def rank_time(c):
-        s = _name_score(c, time_pats) * 3 + dt_success.get(c, 0) * 2
-        if dt_success.get(c, 0) < 0.3: s -= 1.5
-        return s
-
-    def rank_id(c):
-        s = _name_score(c, id_pats) * 3
-        if uniq_ratio[c] > 0.95: s += 2.5
-        if dt_success.get(c, 0) > 0.8: s -= 2
-        return s
-
-    def rank_grp(c):
-        s = _name_score(c, grp_pats) * 2
-        if 2 <= nunique[c] <= 50: s += 2
-        if uniq_ratio[c] > 0.5: s -= 1
-        if dt_success.get(c, 0) > 0.8: s -= 2
-        return s
-
-    sorted_label = sorted(cols, key=rank_label, reverse=True)
-    sorted_split = sorted(cols, key=rank_split, reverse=True)
-    sorted_time  = sorted(cols, key=rank_time, reverse=True)
-    sorted_id    = sorted(cols, key=rank_id, reverse=True)
-    sorted_grp   = sorted(cols, key=rank_grp, reverse=True)
-
-    label = sorted_label[0] if sorted_label and rank_label(sorted_label[0]) >= 2 else None
-    split = sorted_split[0] if sorted_split and rank_split(sorted_split[0]) >= 2 else None
-    time  = sorted_time[0]  if sorted_time  and rank_time(sorted_time[0]) >= 2  else None
-
-    ids, groups = [], []
-    for c in sorted_id:
-        if c in {label, split, time}: continue
-        if rank_id(c) >= 3.5: ids.append(c)
-        if len(ids) >= 3: break
-    for c in sorted_grp:
-        if c in {label, split, time} or c in set(ids): continue
-        if rank_grp(c) >= 2.5: groups.append(c)
-        if len(groups) >= 3: break
-
-    notes = (
-        ([f"Guessed label: {label}"] if label else []) +
-        ([f"Guessed split: {split}"] if split else []) +
-        ([f"Guessed time: {time}"] if time else []) +
-        ([f"Guessed IDs: {', '.join(ids)}"] if ids else []) +
-        ([f"Guessed groups: {', '.join(groups)}"] if groups else [])
-    )
-    return {"label": label, "split": split, "time": time, "ids": ids, "groups": groups, "notes": notes}
-
-def detect_task_type(df: pd.DataFrame, label_col: Optional[str]) -> str:
-    if not label_col or label_col not in df.columns: return "No label selected"
-    y = df[label_col]
-    if pd.api.types.is_numeric_dtype(y.dtype):
-        nu = int(y.nunique(dropna=True))
-        if nu > 20 and nu > 0.05 * max(1, len(y)): return "Regression"
-    nu = int(y.nunique(dropna=True))
-    if nu == 2: return "Binary classification"
-    if 2 < nu <= 50: return "Multi-class classification"
-    return f"Label selected (card={nu})"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Assessment functions
-# ──────────────────────────────────────────────────────────────────────────────
 
 def assess_quality(df, cfg):
-    out = {}
-    miss = df.isna().mean().sort_values(ascending=False)
-    out["missingness"] = {
-        "overall_missing_rate": float(df.isna().mean().mean()),
-        "top_10_columns_missing_rate": miss.head(10).to_dict(),
-    }
-    out["duplicates"] = {"exact_duplicate_row_rate": float(df.duplicated().mean())}
-    if cfg.id_cols:
-        id_cols_ = [c for c in cfg.id_cols if c in df.columns]
-        if id_cols_:
-            out["duplicates"]["duplicate_id_rate"] = float(df.duplicated(subset=id_cols_).mean())
-
-    num = numeric_cols(df, exclude=[c for c in [cfg.label_col, cfg.split_col, cfg.time_col] if c])
-    outlier_rates = {}
-    for c in num:
-        r = approx_iqr_outlier_rate(df[c])
-        if r is not None: outlier_rates[c] = r
-    out["outliers_iqr"] = {
-        "columns_evaluated": len(outlier_rates),
-        "top_10_outlier_rate": dict(sorted(outlier_rates.items(), key=lambda kv: kv[1], reverse=True)[:10]),
-    }
-
-    if cfg.label_col and cfg.label_col in df.columns:
-        y = df[cfg.label_col]
-        vc = y.value_counts(dropna=True)
-        out["label_stats"] = {
-            "label_missing_rate": float(y.isna().mean()),
-            "label_cardinality": int(y.nunique(dropna=True)),
-            "top_classes_share": (vc / vc.sum()).head(10).to_dict() if 2 <= len(vc) <= cfg.max_categories_for_stats else None,
-        }
-
-    if cfg.annotator_label_cols:
-        acols = [c for c in cfg.annotator_label_cols if c in df.columns]
-        if len(acols) >= 2:
-            lab = df[acols]
-            valid = ~lab.isna().all(axis=1)
-            agree = (lab.nunique(axis=1, dropna=True) <= 1) & valid
-            out["label_agreement"] = {
-                "annotator_cols": acols,
-                "rows_with_any_label": int(valid.sum()),
-                "exact_agreement_rate": float(agree[valid].mean()) if valid.sum() else None,
-                "disagreement_rate": float((~agree & valid).mean()) if valid.sum() else None,
-            }
-
-    if cfg.split_col and cfg.split_col in df.columns:
-        split = df[cfg.split_col].astype("string")
-        row_hash = pd.util.hash_pandas_object(df[[c for c in df.columns if c != cfg.split_col]], index=False).astype("uint64")
-        tmp = pd.DataFrame({"split": split, "row_hash": row_hash})
-        distinct = tmp.groupby("row_hash")["split"].nunique()
-        out["split_leakage"] = {
-            "row_hash_cross_split_rate": float((distinct > 1).mean()) if len(distinct) else None,
-            "num_unique_rows_hashed": int(distinct.shape[0]),
-        }
-
-    return out
+    return _core_assess_quality(df, cfg)
 
 
 def assess_reliability(df, cfg):
-    out = {}
-    exclude = [c for c in [cfg.label_col, cfg.split_col, cfg.time_col] if c]
-    num_all = numeric_cols(df, exclude=exclude)
-    slices, slice_type = None, None
-
-    if cfg.time_col and cfg.time_col in df.columns:
-        slice_type = "time"
-        t = to_datetime_if_possible(df[cfg.time_col])
-        if pd.api.types.is_datetime64_any_dtype(t.dtype):
-            slices = t.dt.to_period("M").astype("string")
-        else:
-            v = pd.to_numeric(df[cfg.time_col], errors="coerce")
-            try: slices = pd.qcut(v, q=4, duplicates="drop").astype("string")
-            except: slices = None
-    elif cfg.split_col and cfg.split_col in df.columns:
-        slice_type = "split"
-        slices = df[cfg.split_col].astype("string")
-
-    out["slice_type"] = slice_type
-    if slices is None:
-        out["note"] = "Select a time or split column to compute stability and drift."
-        out["schema_consistency"] = {
-            "num_rows": int(len(df)), "num_cols": int(df.shape[1]),
-            "dtypes": infer_column_types(df),
-            "constant_columns": [c for c in df.columns if df[c].nunique(dropna=False) <= 1],
-        }
-        return out
-
-    miss_by_slice = {str(sv): float(g.isna().mean().mean()) for sv, g in df.groupby(slices, dropna=False)}
-    out["missing_rate_by_slice"] = miss_by_slice
-
-    uniq = pd.Series(slices).dropna().unique().tolist()
-    num = num_all
-    if cfg.drift_max_num_cols and len(num_all) > cfg.drift_max_num_cols:
-        variances = [(c, float(pd.to_numeric(df[c], errors="coerce").var(skipna=True))) for c in num_all]
-        num = [c for c, _ in sorted(variances, key=lambda t: t[1], reverse=True)[:cfg.drift_max_num_cols]]
-
-    drift = {}
-    if len(uniq) >= 2 and num:
-        uniq_sorted = sorted(map(str, uniq))
-        s1, s2 = uniq_sorted[0], uniq_sorted[-1]
-        s_ser = pd.Series(slices).astype("string")
-        g1, g2 = df[s_ser == s1], df[s_ser == s2]
-        for c in num:
-            d = ks_statistic(pd.to_numeric(g1[c], errors="coerce").to_numpy(),
-                             pd.to_numeric(g2[c], errors="coerce").to_numpy())
-            if d is not None: drift[c] = d
-        out["numeric_drift_ks_first_last"] = {
-            "first_slice": s1, "last_slice": s2,
-            "first_slice_rows": int(len(g1)), "last_slice_rows": int(len(g2)),
-            "num_cols_evaluated": int(len(num)),
-            "top_10_ks": dict(sorted(drift.items(), key=lambda kv: kv[1], reverse=True)[:10]),
-        }
-
-    out["schema_consistency"] = {
-        "num_rows": int(len(df)), "num_cols": int(df.shape[1]),
-        "dtypes": infer_column_types(df),
-        "constant_columns": [c for c in df.columns if df[c].nunique(dropna=False) <= 1],
-    }
-    return out
+    return _core_assess_reliability(df, cfg)
 
 
 def assess_robustness(df, cfg):
-    out = {"sklearn_available": SKLEARN_OK}
-    exclude = [c for c in [cfg.label_col, cfg.split_col, cfg.time_col] if c]
-
-    if cfg.label_col and cfg.label_col in df.columns:
-        y = df[cfg.label_col]
-        cat_all = categorical_cols(df, exclude=exclude)
-        cat = cat_all[:cfg.rare_max_cat_cols]
-        suspicious = []
-        for c in cat:
-            vc = df[c].value_counts(dropna=True)
-            rare = vc[vc <= max(5, int(0.001 * len(df)))].index.tolist()
-            for v in rare[:200]:
-                mask = df[c] == v
-                if mask.sum() < 5: continue
-                dist = y[mask].value_counts(normalize=True, dropna=True)
-                if len(dist) >= 1 and float(dist.iloc[0]) >= 0.95:
-                    suspicious.append({"column": c, "value": str(v), "count": int(mask.sum()),
-                                       "top_label": str(dist.index[0]), "top_label_share": float(dist.iloc[0])})
-        out["rare_category_label_concentration"] = {
-            "num_findings": len(suspicious),
-            "top_findings": sorted(suspicious, key=lambda d: (-d["top_label_share"], -d["count"]))[:20],
-            "columns_scanned": int(len(cat)),
-        }
-
-    num = numeric_cols(df, exclude=exclude)
-    if num:
-        X = df[num].apply(pd.to_numeric, errors="coerce")
-        med = X.median(axis=0, skipna=True)
-        mad = (X - med).abs().median(axis=0, skipna=True).replace(0, np.nan)
-        z = (X - med).abs().divide(mad)
-        row_score = z.mean(axis=1, skipna=True)
-        out["row_anomaly_score_mad"] = {
-            "mean": float(row_score.mean(skipna=True)),
-            "p95": float(row_score.quantile(0.95)),
-            "p99": float(row_score.quantile(0.99)),
-            "max": float(row_score.max(skipna=True)),
-            "top_20_row_indices": row_score.sort_values(ascending=False).head(20).index.tolist(),
-        }
-
-    if SKLEARN_OK and cfg.label_col and cfg.label_col in df.columns and num:
-        y = df[cfg.label_col]
-        if y.dropna().nunique() == 2:
-            y_enc, _ = pd.factorize(y)
-            mask = y.notna()
-            X = df.loc[mask, num].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-            y_enc = y_enc[mask.to_numpy()]
-            if len(X) >= 200:
-                Xtr, Xte, ytr, yte = train_test_split(X, y_enc, test_size=0.25,
-                                                       random_state=cfg.random_state, stratify=y_enc)
-                try:
-                    clf = LogisticRegression(max_iter=250, n_jobs=1)
-                    clf.fit(Xtr, ytr)
-                    out["label_predictability_auc"] = float(roc_auc_score(yte, clf.predict_proba(Xte)[:, 1]))
-                except Exception as e:
-                    out["label_predictability_auc"] = {"error": str(e)}
-            else:
-                out["label_predictability_auc"] = {"note": "Need ≥ 200 labeled rows."}
-        else:
-            out["label_predictability_auc"] = {"note": "Binary labels only."}
-    else:
-        out["label_predictability_auc"] = {"note": "Install scikit-learn + select label + numeric features."}
-
-    return out
+    return _core_assess_robustness(df, cfg)
 
 
 def assess_fairness(df, cfg):
-    if not cfg.group_cols:
-        return {"note": "Select group columns to compute fairness checks."}
-    out = {}
-    label_ok = bool(cfg.label_col and cfg.label_col in df.columns)
-    per = {}
-    for gcol in [c for c in cfg.group_cols if c in df.columns]:
-        counts = df[gcol].value_counts(dropna=False)
-        shares = counts / max(1, counts.sum())
-        stats: Dict[str, Any] = {
-            "num_groups": int(len(counts)),
-            "min_group_share": float(shares.min()) if len(shares) else None,
-            "max_group_share": float(shares.max()) if len(shares) else None,
-            "representation_share_top10": shares.sort_values(ascending=False).head(10).to_dict(),
-        }
-        miss_disp = {}
-        for c in df.columns:
-            mr = df.groupby(gcol)[c].apply(lambda s: s.isna().mean())
-            if mr.shape[0] >= 2: miss_disp[c] = float(mr.max() - mr.min())
-        stats["missingness_disparity_top10"] = dict(sorted(miss_disp.items(), key=lambda kv: kv[1], reverse=True)[:10])
-        if label_ok:
-            stats["label_missingness_by_group"] = df.groupby(gcol)[cfg.label_col].apply(lambda s: s.isna().mean()).to_dict()
-            y = df[cfg.label_col]
-            if y.dropna().nunique() == 2:
-                tmp = df.copy()
-                tmp["_y"], _ = pd.factorize(tmp[cfg.label_col])
-                pos = tmp[tmp[cfg.label_col].notna()].groupby(gcol)["_y"].mean()
-                if len(pos) >= 2:
-                    stats["positive_rate_by_group"] = pos.to_dict()
-                    stats["positive_rate_disparity"] = float(pos.max() - pos.min())
-        per[gcol] = stats
-    out["group_checks"] = per
-    return out
+    return _core_assess_fairness(df, cfg)
 
 
 def assess_security(df, cfg, dataset_bytes):
-    out = {}
-    text_cols = categorical_cols(df, exclude=[c for c in [cfg.label_col, cfg.split_col, cfg.time_col] if c])
-    text_cols = text_cols[:cfg.pii_max_text_cols]
-    hits = {}
-    for c in text_cols:
-        s = df[c].dropna().astype("string")
-        if s.empty: continue
-        n = min(len(s), cfg.pii_max_rows)
-        sample = s.sample(n=n, random_state=cfg.random_state) if len(s) > n else s
-        col_hits = {nm: float(sample.str.contains(pat, regex=True).mean())
-                    for nm, pat in PII_PATTERNS.items()
-                    if float(sample.str.contains(pat, regex=True).mean()) >= cfg.thresholds.pii_hit_rate_threshold}
-        if col_hits: hits[c] = col_hits
-    out["confidentiality_pii_heuristics"] = {
-        "note": "Heuristic scan. Validate with domain and legal review.",
-        "threshold_hit_rate": float(cfg.thresholds.pii_hit_rate_threshold),
-        "rows_sampled_per_col_max": int(cfg.pii_max_rows),
-        "text_cols_scanned_max": int(cfg.pii_max_text_cols),
-        "columns_with_hits": hits,
-    }
-    out["integrity"] = {"sha256": sha256_bytes(dataset_bytes)}
-    out["availability_asset_checks"] = {"byte_size": int(len(dataset_bytes))}
-    return out
+    return _core_assess_security(df, cfg, dataset_bytes)
 
 
 def assess_all(df, cfg, dataset_bytes):
-    if cfg.mode == "Full Scan":
-        cfg.pii_max_rows = max(cfg.pii_max_rows, 5000)
-        cfg.pii_max_text_cols = max(cfg.pii_max_text_cols, 25)
-        cfg.rare_max_cat_cols = max(cfg.rare_max_cat_cols, 100)
-        cfg.drift_max_num_cols = max(cfg.drift_max_num_cols, 100)
-    return {
-        "quality":     assess_quality(df, cfg),
-        "reliability": assess_reliability(df, cfg),
-        "robustness":  assess_robustness(df, cfg),
-        "fairness":    assess_fairness(df, cfg),
-        "security":    assess_security(df, cfg, dataset_bytes),
-        "notes": {
-            "sklearn_available": SKLEARN_OK, "mode": cfg.mode,
-            "thresholds": {"drift_ks_threshold": cfg.thresholds.drift_ks_threshold,
-                           "pii_hit_rate_threshold": cfg.thresholds.pii_hit_rate_threshold},
-        },
-    }
+    return _core_assess_all(df, cfg, dataset_bytes)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Verdict & recommendations
-# ──────────────────────────────────────────────────────────────────────────────
 
 def verdict_panel(report, cfg):
-    reasons = []
-    pii = report["security"]["confidentiality_pii_heuristics"]["columns_with_hits"]
-    leak = report["quality"].get("split_leakage", {}).get("row_hash_cross_split_rate", None)
-    drift = report["reliability"].get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
-    if pii: reasons.append("PII-like patterns detected — review confidentiality and legal basis.")
-    if leak is not None and float(leak) > 0: reasons.append("Potential split leakage — identical rows appear across splits.")
-    if any(v is not None and float(v) > cfg.thresholds.drift_ks_threshold for v in drift.values()):
-        reasons.append("Potential drift — at least one KS statistic exceeds the threshold.")
-    if reasons: return "Needs review", "warn", reasons
-    return "Looks OK (evidence-based)", "ok", ["No major red flags under current checks."]
+    return _core_tabular_verdict(report, cfg)
 
 
 def build_recommendations(report, cfg):
-    recs = []
-    q = report.get("quality", {})
-    miss = q.get("missingness", {}).get("overall_missing_rate", None)
-    dup  = q.get("duplicates", {}).get("exact_duplicate_row_rate", None)
-    leak = q.get("split_leakage", {}).get("row_hash_cross_split_rate", None)
-    drift = report.get("reliability", {}).get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
-    pii   = report.get("security", {}).get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
+    return _core_build_recs(report, cfg)
 
-    if miss is not None and float(miss) > 0.05:
-        recs.append("Missingness > 5% — inspect top missing columns and decide: drop, impute, or recollect.")
-    if dup is not None and float(dup) > 0.01:
-        recs.append("Duplicate rows > 1% — deduplicate and verify duplicates don't cross splits.")
-    if leak is not None and float(leak) > 0:
-        recs.append("Split leakage detected — re-split at entity level using ID columns.")
-    if drift and any(float(v) > cfg.thresholds.drift_ks_threshold for v in drift.values() if v is not None):
-        recs.append("Drift above threshold — compare distributions and consider retraining or recalibration.")
-    if pii:
-        recs.append("PII-like patterns found — mask or remove flagged columns and confirm legal basis.")
-    if not recs:
-        recs.append("No major red flags. Keep the report as evidence and rerun after data updates.")
-    return recs
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header
@@ -826,23 +443,46 @@ if uploaded is None:
 file_bytes = uploaded.getvalue()
 file_name  = uploaded.name or "dataset"
 
+
+# ─── Cached helpers ───────────────────────────────────────────────────────────
+# Caching makes sidebar widget edits (thresholds, weights, column toggles)
+# essentially free: the dataset is parsed once per file and analysis results
+# are reused until the file or scan config actually changes.
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_read_tabular(_bytes: bytes, name: str) -> Tuple[pd.DataFrame, str]:
+    lower = name.lower()
+    if lower.endswith(".csv"):
+        return pd.read_csv(BytesIO(_bytes)), "CSV"
+    if lower.endswith(".parquet"):
+        return pd.read_parquet(BytesIO(_bytes)), "Parquet"
+    if lower.endswith((".xls", ".xlsx")):
+        return pd.read_excel(BytesIO(_bytes)), "Excel"
+    raise ValueError("Unsupported file type. Upload CSV, Parquet, XLS, or XLSX.")
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_guess_columns(df_hash: str, df: pd.DataFrame) -> Dict[str, Any]:
+    return guess_columns(df)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_assess(df_hash: str, df: pd.DataFrame, cfg_key: str,
+                    cfg: "AssessConfig", file_bytes: bytes) -> Dict[str, Any]:
+    return assess_all(df, cfg, file_bytes)
+
+
 try:
-    lower_name = file_name.lower()
-    if lower_name.endswith(".csv"):
-        df = pd.read_csv(BytesIO(file_bytes)); detected = "CSV"
-    elif lower_name.endswith(".parquet"):
-        df = pd.read_parquet(BytesIO(file_bytes)); detected = "Parquet"
-    elif lower_name.endswith((".xls", ".xlsx")):
-        df = pd.read_excel(BytesIO(file_bytes)); detected = "Excel"
-    else:
-        st.error("Unsupported file type. Upload CSV, Parquet, XLS, or XLSX.")
-        st.stop()
+    df, detected = _cached_read_tabular(file_bytes, file_name)
+except ValueError as e:
+    st.error(str(e)); st.stop()
 except Exception as e:
     st.error(f"Failed to load file: {e}"); st.stop()
 
 cols = df.columns.tolist()
-if "tab_guesses" not in st.session_state:
-    st.session_state["tab_guesses"] = guess_columns(df)
+_df_hash = sha256_bytes(file_bytes)
+if "tab_guesses" not in st.session_state or st.session_state.get("tab_guesses_hash") != _df_hash:
+    st.session_state["tab_guesses"] = _cached_guess_columns(_df_hash, df)
+    st.session_state["tab_guesses_hash"] = _df_hash
 
 with st.sidebar:
     st.header("⚙️ Run mode")
@@ -1004,7 +644,19 @@ cfg = AssessConfig(
 )
 
 with st.spinner("Running checks…"):
-    report = assess_all(df, cfg, file_bytes)
+    # Build a stable cache key from the scan-relevant config (weights are NOT
+    # included — they only affect post-hoc scoring, so the heavy assess_all
+    # output can be reused when only weights change).
+    _cfg_key = json.dumps({
+        "label_col": label_col, "split_col": split_col, "time_col": time_col,
+        "id_cols": sorted(id_cols), "group_cols": sorted(group_cols),
+        "annotator_cols": sorted(annotator_cols),
+        "random_state": int(random_state), "mode": mode,
+        "preset": preset_name,
+        "drift_ks_threshold": th.drift_ks_threshold,
+        "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
+    }, sort_keys=True)
+    report = _cached_assess(_df_hash, df, _cfg_key, cfg, file_bytes)
 
 safe_report = to_json_safe(report)
 verdict, vkind, reasons = verdict_panel(report, cfg)
@@ -1472,55 +1124,4 @@ with tab_sec:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Export ────────────────────────────────────────────────────────────────────
-with tab_exp:
-    st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
-    st.subheader("Export")
-    st.caption("All exports include report data, thresholds, and mode. JSON values are pandas/numpy-safe.")
-
-    col_e1, col_e2, col_e3 = st.columns(3, gap="large")
-
-    with col_e1:
-        st.markdown("**JSON report**")
-        json_bytes = json.dumps(safe_report, indent=2, ensure_ascii=False).encode("utf-8")
-        st.download_button("⬇ Download JSON", data=json_bytes,
-                           file_name="dataset_report.json", mime="application/json",
-                           use_container_width=True)
-
-    with col_e2:
-        st.markdown("**Markdown summary**")
-        md_lines = [
-            f"# Dataset Safety Report — {file_name}", "",
-            f"- **Mode:** {mode}", f"- **Preset:** {preset_name}",
-            f"- **Health score:** {score}/100 (Grade {grade})",
-            f"- **Verdict:** {verdict}", "",
-            "## Findings", *[f"- {r}" for r in reasons], "",
-            "## Recommended actions", *[f"- {r}" for r in recs], "",
-            "## Key metrics",
-            f"- Rows: {df.shape[0]:,}", f"- Columns: {df.shape[1]:,}",
-            f"- Missingness: {miss_rate:.4f}", f"- Duplicate rows: {dup_rate:.4f}",
-            f"- PII flagged columns: {len(pii_cols)}", f"- SHA-256: {sha256_bytes(file_bytes)}", "",
-            "---", "*Heuristic report. Validate with domain and legal review.*"
-        ]
-        md_bytes = "\n".join(md_lines).encode("utf-8")
-        st.download_button("⬇ Download Markdown", data=md_bytes,
-                           file_name="dataset_report.md", mime="text/markdown",
-                           use_container_width=True)
-
-    with col_e3:
-        st.markdown("**HTML report**")
-        html_content = build_html_report(
-            df=df, report=report, cfg_dict=cfg_dict, file_name=file_name,
-            file_bytes=file_bytes, verdict=verdict, reasons=reasons,
-            recs=recs, score=score, grade=grade,
-        )
-        st.download_button("⬇ Download HTML", data=html_content.encode("utf-8"),
-                           file_name="dataset_report.html", mime="text/html",
-                           use_container_width=True)
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-    registry_payload = {"analyzer": "tabular", "threshold_docs": THRESHOLD_DOCS, "metric_docs": METRIC_DOCS}
-    st.download_button("⬇ Download metric registry JSON", data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"), file_name="tabular_metric_registry.json", mime="application/json", use_container_width=True)
-    with st.expander("Raw JSON (preview)"):
-        st.json(safe_report)
-    st.markdown('</div>', unsafe_allow_html=True)
+# ── Export ─────────────────────�
