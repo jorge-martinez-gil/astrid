@@ -483,6 +483,36 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
 }
 
 
+EU_AI_ACT_SOURCE_URL = "https://eur-lex.europa.eu/eli/reg/2024/1689/"
+
+EU_AI_ACT_ARTICLE_REFERENCES: Dict[str, Dict[str, str]] = {
+    "Article 9": {
+        "title": "Risk management system",
+        "aspect": "Identifying, evaluating, and mitigating reasonably foreseeable risks.",
+    },
+    "Article 10": {
+        "title": "Data and data governance",
+        "aspect": "Training, validation, and testing data quality, relevance, representativeness, completeness, and bias controls.",
+    },
+    "Article 11": {
+        "title": "Technical documentation",
+        "aspect": "Technical evidence that explains system design, testing, limitations, and data assumptions.",
+    },
+    "Article 12": {
+        "title": "Record-keeping",
+        "aspect": "Logs and records that support traceability and post-hoc review.",
+    },
+    "Article 13": {
+        "title": "Transparency and provision of information to deployers",
+        "aspect": "Clear information about capabilities, limitations, intended use, input data, and expected performance.",
+    },
+    "Article 15": {
+        "title": "Accuracy, robustness and cybersecurity",
+        "aspect": "Evidence about accuracy-related data risks, robustness, stability, and security-relevant signals.",
+    },
+}
+
+
 def compute_health_score(
     report: Dict[str, Any],
     drift_threshold: float = 0.30,
@@ -782,6 +812,259 @@ def render_transparency_tab(df: pd.DataFrame, file_name: str, file_bytes: bytes,
 # ─────────────────────────────────────────────
 # HTML Export
 # ─────────────────────────────────────────────
+
+def _eu_get_path(payload: Dict[str, Any], path: str) -> Any:
+    cur: Any = payload
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _eu_first_path(payload: Dict[str, Any], paths: List[str]) -> Tuple[Optional[str], Any]:
+    for path in paths:
+        value = _eu_get_path(payload, path)
+        if value is not None:
+            return path, value
+    return None, None
+
+
+def _eu_as_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(value):
+        return None
+    return value
+
+
+def _eu_max_numeric(values: Any) -> Optional[float]:
+    if not isinstance(values, dict):
+        return None
+    nums = [_eu_as_float(v) for v in values.values()]
+    nums = [v for v in nums if v is not None]
+    return max(nums) if nums else None
+
+
+def _eu_format_value(value: Any, *, percent: bool = False) -> str:
+    if value is None:
+        return "Not available"
+    if isinstance(value, bool):
+        return str(value)
+    numeric = _eu_as_float(value)
+    if numeric is not None:
+        return f"{numeric:.2%}" if percent else f"{numeric:.4f}"
+    return str(value)
+
+
+def _eu_status(value: Any, threshold: Optional[float] = None, *, higher_is_risk: bool = True) -> str:
+    numeric = _eu_as_float(value)
+    if numeric is None or threshold is None:
+        return "Evidence"
+    risky = numeric > threshold if higher_is_risk else numeric < threshold
+    return "Review" if risky else "OK"
+
+
+def _eu_add_item(
+    items: List[Dict[str, Any]],
+    *,
+    article: str,
+    metric: str,
+    evidence_path: str,
+    value: Any,
+    interpretation: str,
+    threshold: Optional[float] = None,
+    percent: bool = False,
+    higher_is_risk: bool = True,
+) -> None:
+    if value is None:
+        return
+    ref = EU_AI_ACT_ARTICLE_REFERENCES[article]
+    items.append(
+        {
+            "article": article,
+            "article_title": ref["title"],
+            "law_aspect": ref["aspect"],
+            "metric": metric,
+            "evidence_path": evidence_path,
+            "observed_value": _eu_format_value(value, percent=percent),
+            "raw_value": to_json_safe(value),
+            "threshold": None if threshold is None else _eu_format_value(threshold, percent=percent),
+            "status": _eu_status(value, threshold, higher_is_risk=higher_is_risk),
+            "interpretation": interpretation,
+        }
+    )
+
+
+def build_eu_ai_act_evidence(
+    *,
+    analyzer: str,
+    report: Dict[str, Any],
+    cfg_dict: Optional[Dict[str, Any]] = None,
+    file_name: Optional[str] = None,
+    score: Optional[int] = None,
+    grade: Optional[str] = None,
+    verdict: Optional[str] = None,
+    findings: Optional[List[str]] = None,
+    recommendations: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Map ASTRID results to selected EU AI Act evidence areas."""
+    cfg_dict = cfg_dict or {}
+    findings = findings or []
+    recommendations = recommendations or []
+    thresholds = cfg_dict.get("thresholds", {}) if isinstance(cfg_dict.get("thresholds"), dict) else {}
+    drift_threshold = _eu_as_float(
+        cfg_dict.get("drift_ks_threshold", thresholds.get("drift_ks_threshold", 0.30))
+    )
+    items: List[Dict[str, Any]] = []
+
+    _eu_add_item(items, article="Article 9", metric="Overall audit verdict", evidence_path="verdict", value=verdict, interpretation="The verdict summarizes observed risk signals that may warrant mitigation or acceptance decisions.")
+    _eu_add_item(items, article="Article 9", metric="Findings count", evidence_path="findings", value=len(findings), interpretation="Findings provide a run-specific list of risks to review in a risk-management workflow.")
+    _eu_add_item(items, article="Article 9", metric="Recommended actions count", evidence_path="recommendations", value=len(recommendations), interpretation="Recommendations translate detected issues into remediation evidence.")
+
+    path, value = _eu_first_path(report, ["quality.missingness.overall_missing_rate"])
+    _eu_add_item(items, article="Article 10", metric="Overall missingness", evidence_path=path or "quality.missingness.overall_missing_rate", value=value, threshold=0.15, percent=True, interpretation="Completeness evidence for training, validation, or testing data quality review.")
+    path, value = _eu_first_path(report, ["quality.duplicates.exact_duplicate_row_rate", "quality.duplicates.exact_duplicate_rate", "quality.exact_duplicate_row_rate"])
+    _eu_add_item(items, article="Article 10", metric="Exact duplicate rate", evidence_path=path or "quality.duplicates", value=value, threshold=0.08, percent=True, interpretation="Duplicate evidence supports data quality, leakage, and representativeness review.")
+    path, value = _eu_first_path(report, ["quality.metadata_completeness.metadata_completeness", "transparency.datasheet_completeness.completeness_rate"])
+    _eu_add_item(items, article="Article 10", metric="Metadata or datasheet completeness", evidence_path=path or "quality.metadata_completeness", value=value, threshold=0.80, percent=True, higher_is_risk=False, interpretation="Metadata completeness supports data governance and traceability of dataset assumptions.")
+    path, value = _eu_first_path(report, ["quality.label_stats.label_missing_rate", "quality.annotation_linkage.annotation_linkage_rate"])
+    _eu_add_item(items, article="Article 10", metric="Label or annotation coverage", evidence_path=path or "quality.label_stats", value=value, percent=True, interpretation="Label and annotation coverage indicate whether supervised data is usable and sufficiently documented.")
+
+    group_checks = _eu_get_path(report, "fairness.group_checks")
+    if isinstance(group_checks, dict):
+        disparities: List[float] = []
+        for stats in group_checks.values():
+            if not isinstance(stats, dict):
+                continue
+            for key in ("positive_rate_disparity", "max_label_parity_gap", "max_missingness_disparity"):
+                val = _eu_as_float(stats.get(key))
+                if val is not None:
+                    disparities.append(val)
+        _eu_add_item(items, article="Article 10", metric="Maximum subgroup disparity", evidence_path="fairness.group_checks", value=max(disparities) if disparities else None, threshold=0.40, percent=True, interpretation="Subgroup disparity evidence supports bias and representativeness review.")
+
+    _eu_add_item(items, article="Article 11", metric="Configuration captured", evidence_path="config", value=bool(cfg_dict), interpretation="The run configuration supports reproducible technical documentation.")
+    _eu_add_item(items, article="Article 11", metric="Health score and grade", evidence_path="score", value=f"{score}/100 ({grade})" if score is not None else None, interpretation="The health score is technical evidence of the dataset assessment outcome.")
+    _eu_add_item(items, article="Article 12", metric="Integrity fingerprint", evidence_path="security.integrity", value=_eu_first_path(report, ["security.integrity.sha256", "security.integrity.sha256_zip"])[1], interpretation="A cryptographic fingerprint supports record-keeping and later traceability.")
+    _eu_add_item(items, article="Article 12", metric="Dataset or file name", evidence_path="dataset_name", value=file_name, interpretation="Dataset identity links the evidence report to a concrete audited artifact.")
+
+    path, value = _eu_first_path(report, ["transparency.dataset_identity.total_images", "reliability.schema_consistency.num_rows", "quality.time_axis_health.time_range.span_days"])
+    _eu_add_item(items, article="Article 13", metric="Dataset identity or scope", evidence_path=path or "transparency.dataset_identity", value=value, interpretation="Scope and identity fields help deployers understand the audited input data.")
+    path, value = _eu_first_path(report, ["transparency.traceability_coverage.coverage_rate", "transparency.source_attribution_coverage.coverage_rate", "transparency.datasheet_completeness.completeness_rate"])
+    _eu_add_item(items, article="Article 13", metric="Traceability or transparency coverage", evidence_path=path or "transparency", value=value, threshold=0.80, percent=True, higher_is_risk=False, interpretation="Transparency evidence helps communicate limitations, provenance, and assumptions to deployers.")
+
+    drift_path, drift_values = _eu_first_path(report, ["reliability.numeric_drift_ks_first_last.top_10_ks", "reliability.feature_drift_ks_first_last.top_10_ks"])
+    _eu_add_item(items, article="Article 15", metric="Maximum drift statistic", evidence_path=drift_path or "reliability.*_drift_ks_first_last.top_10_ks", value=_eu_max_numeric(drift_values), threshold=drift_threshold, interpretation="Drift evidence supports robustness and expected performance stability review.")
+    path, value = _eu_first_path(report, ["quality.split_leakage.row_hash_cross_split_rate", "quality.cross_split_leakage.cross_split_leakage_rate"])
+    _eu_add_item(items, article="Article 15", metric="Cross-split leakage", evidence_path=path or "quality.split_leakage", value=value, threshold=0.01, percent=True, interpretation="Leakage evidence supports robustness and reliable validation review.")
+    path, value = _eu_first_path(report, ["robustness.row_anomaly_score_mad.p99", "robustness.image_feature_outliers_mad.outlier_rate"])
+    _eu_add_item(items, article="Article 15", metric="Outlier or anomaly signal", evidence_path=path or "robustness", value=value, interpretation="Outlier evidence supports robustness review under unusual or edge-case data.")
+    path, value = _eu_first_path(report, ["quality.time_axis_health.time_parse.parse_ok_rate", "quality.time_axis_health.cadence_global.irregularity_ratio"])
+    _eu_add_item(items, article="Article 15", metric="Temporal stability signal", evidence_path=path or "quality.time_axis_health", value=value, interpretation="Time-axis quality supports stability and expected performance review for temporal datasets.")
+    pii_hits = _eu_get_path(report, "security.confidentiality_pii_heuristics.columns_with_hits")
+    _eu_add_item(items, article="Article 15", metric="PII-like fields flagged", evidence_path="security.confidentiality_pii_heuristics.columns_with_hits", value=len(pii_hits) if isinstance(pii_hits, dict) else None, threshold=0, interpretation="Privacy-sensitive patterns are security-relevant signals that require domain and legal review.")
+    path, value = _eu_first_path(report, ["security.exif_privacy.gps_images_count", "security.suspicious_samples.suspicious_sample_rate"])
+    _eu_add_item(items, article="Article 15", metric="Image security/privacy signal", evidence_path=path or "security.exif_privacy", value=value, interpretation="EXIF, GPS, and suspicious-sample signals support cybersecurity and privacy-risk review.")
+
+    return to_json_safe(
+        {
+            "title": "EU AI Act Evidence Mapping",
+            "source": EU_AI_ACT_SOURCE_URL,
+            "legal_disclaimer": "This report maps ASTRID technical evidence to selected EU AI Act requirement areas. It is not a legal opinion, compliance certification, or high-risk classification.",
+            "analyzer": analyzer,
+            "dataset_name": file_name,
+            "summary": {"score": score, "grade": grade, "verdict": verdict, "findings_count": len(findings), "recommendations_count": len(recommendations)},
+            "article_references": EU_AI_ACT_ARTICLE_REFERENCES,
+            "evidence": items,
+        }
+    )
+
+
+def build_eu_ai_act_evidence_markdown(evidence_report: Dict[str, Any]) -> str:
+    def cell(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "# EU AI Act Evidence Mapping",
+        "",
+        evidence_report.get("legal_disclaimer", ""),
+        "",
+        f"- **Source:** {evidence_report.get('source', EU_AI_ACT_SOURCE_URL)}",
+        f"- **Analyzer:** {evidence_report.get('analyzer', '')}",
+        f"- **Dataset:** {evidence_report.get('dataset_name', '')}",
+        "",
+        "## Run summary",
+        "",
+    ]
+    for key, value in evidence_report.get("summary", {}).items():
+        lines.append(f"- **{key.replace('_', ' ').title()}:** {value}")
+    lines += [
+        "",
+        "## Evidence map",
+        "",
+        "| EU AI Act area | Metric | Observed value | Threshold | Status | Evidence path | Interpretation |",
+        "| --- | --- | ---: | ---: | --- | --- | --- |",
+    ]
+    for item in evidence_report.get("evidence", []):
+        article = f"{item.get('article')} - {item.get('article_title')}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    cell(article),
+                    cell(item.get("metric", "")),
+                    cell(item.get("observed_value", "")),
+                    cell(item.get("threshold") or ""),
+                    cell(item.get("status", "")),
+                    cell(item.get("evidence_path", "")),
+                    cell(item.get("interpretation", "")),
+                ]
+            )
+            + " |"
+        )
+    lines += ["", "## Article reference areas", ""]
+    for article, ref in evidence_report.get("article_references", {}).items():
+        lines.append(f"- **{article} - {ref.get('title')}:** {ref.get('aspect')}")
+    return "\n".join(lines)
+
+
+def render_eu_ai_act_evidence_section(evidence_report: Dict[str, Any]) -> None:
+    if st is None:
+        return
+    st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+    st.subheader("EU AI Act Evidence")
+    st.caption(evidence_report.get("legal_disclaimer", ""))
+    st.markdown(f"Official source: [{EU_AI_ACT_SOURCE_URL}]({EU_AI_ACT_SOURCE_URL})")
+    summary = evidence_report.get("summary", {})
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Mapped evidence items", len(evidence_report.get("evidence", [])))
+    with c2:
+        st.metric("Score", "N/A" if summary.get("score") is None else f"{summary.get('score')}/100")
+    with c3:
+        st.metric("Grade", summary.get("grade") or "N/A")
+    rows = [
+        {
+            "EU AI Act area": f"{item.get('article')} - {item.get('article_title')}",
+            "Metric": item.get("metric"),
+            "Observed value": item.get("observed_value"),
+            "Threshold": item.get("threshold") or "",
+            "Status": item.get("status"),
+            "Evidence path": item.get("evidence_path"),
+            "Interpretation": item.get("interpretation"),
+        }
+        for item in evidence_report.get("evidence", [])
+    ]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No EU AI Act evidence items could be mapped for this report.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 def build_markdown_report(df, report, cfg_dict, file_name, file_bytes,
                            verdict, reasons, recs, score, grade):

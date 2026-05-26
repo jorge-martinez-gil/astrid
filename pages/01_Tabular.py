@@ -10,7 +10,9 @@ from utils import (
     compute_health_score, get_dimension_status, render_transparency_tab,
     build_html_report, build_markdown_report, PII_PATTERNS, infer_column_types,
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
-    to_datetime_if_possible, DEFAULT_WEIGHTS
+    to_datetime_if_possible, DEFAULT_WEIGHTS,
+    build_eu_ai_act_evidence, build_eu_ai_act_evidence_markdown,
+    render_eu_ai_act_evidence_section,
 )
 from audit_history import build_audit_record, save_audit_record
 
@@ -624,6 +626,17 @@ audit_record = build_audit_record(
     config=cfg_dict,
     score_components=score_components,
 )
+eu_ai_act_report = build_eu_ai_act_evidence(
+    analyzer="tabular",
+    report=safe_report,
+    cfg_dict=cfg_dict,
+    file_name=file_name,
+    score=score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+)
 try:
     audit_saved_path = save_audit_record(audit_record)
 except OSError:
@@ -696,8 +709,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Tabs
 # ──────────────────────────────────────────────────────────────────────────────
 
-tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_exp = st.tabs(
-    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "Export"]
+tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_eu, tab_exp = st.tabs(
+    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "EU AI Act Evidence", "Export"]
 )
 
 # ── Overview ──────────────────────────────────────────────────────────────────
@@ -1047,6 +1060,70 @@ with tab_sec:
     else:
         st.success("✓ No PII-like patterns flagged in the heuristic scan.")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with tab_eu:
+    render_eu_ai_act_evidence_section(eu_ai_act_report)
+
+with tab_exp:
+    st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+    st.subheader("Export")
+    col_e1, col_e2, col_e3 = st.columns(3, gap="large")
+    with col_e1:
+        st.markdown("**JSON report**")
+        st.download_button(
+            "⬇ Download JSON",
+            data=json.dumps(safe_report, indent=2, ensure_ascii=False).encode("utf-8"),
+            file_name="tabular_dataset_report.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with col_e2:
+        st.markdown("**Markdown summary**")
+        md = build_markdown_report(
+            df=df, report=report, cfg_dict=cfg_dict, file_name=file_name,
+            file_bytes=file_bytes, verdict=verdict, reasons=reasons,
+            recs=recs, score=score, grade=grade,
+        )
+        st.download_button(
+            "⬇ Download Markdown",
+            data=md.encode("utf-8"),
+            file_name="tabular_report.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_e3:
+        st.markdown("**HTML report**")
+        html_content = build_html_report(
+            df=df, report=report, cfg_dict=cfg_dict, file_name=file_name,
+            file_bytes=file_bytes, verdict=verdict, reasons=reasons,
+            recs=recs, score=score, grade=grade,
+        )
+        st.download_button(
+            "⬇ Download HTML",
+            data=html_content.encode("utf-8"),
+            file_name="tabular_report.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    st.markdown("**EU AI Act evidence report**")
+    st.download_button(
+        "⬇ Download EU AI Act evidence (Markdown)",
+        data=build_eu_ai_act_evidence_markdown(eu_ai_act_report).encode("utf-8"),
+        file_name="tabular_eu_ai_act_evidence.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    st.download_button(
+        "⬇ Download EU AI Act evidence (JSON)",
+        data=json.dumps(eu_ai_act_report, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="tabular_eu_ai_act_evidence.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    with st.expander("Raw JSON (preview)"):
+        st.json(safe_report)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Export ─────────────────────�

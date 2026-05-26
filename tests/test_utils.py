@@ -7,7 +7,13 @@ import pandas as pd
 
 sys.modules.setdefault("streamlit", types.ModuleType("streamlit"))
 
-from utils import build_html_report, compute_health_score, to_json_safe
+from utils import (
+    build_eu_ai_act_evidence,
+    build_eu_ai_act_evidence_markdown,
+    build_html_report,
+    compute_health_score,
+    to_json_safe,
+)
 
 
 def test_compute_health_score_normalizes_custom_weights():
@@ -130,8 +136,44 @@ def test_build_html_report_supports_image_reports():
     assert "SHA-256" in html
 
 
+def test_eu_ai_act_evidence_maps_results_to_articles():
+    report = {
+        "quality": {
+            "missingness": {"overall_missing_rate": 0.12},
+            "duplicates": {"exact_duplicate_row_rate": 0.03},
+            "split_leakage": {"row_hash_cross_split_rate": 0.0},
+        },
+        "reliability": {"numeric_drift_ks_first_last": {"top_10_ks": {"sensor": 0.22}}},
+        "robustness": {"row_anomaly_score_mad": {"p99": 2.5}},
+        "fairness": {"group_checks": {"site": {"positive_rate_disparity": 0.18}}},
+        "security": {
+            "integrity": {"sha256": "abc123"},
+            "confidentiality_pii_heuristics": {"columns_with_hits": {}},
+        },
+    }
+
+    evidence = build_eu_ai_act_evidence(
+        analyzer="tabular",
+        report=report,
+        cfg_dict={"drift_ks_threshold": 0.3},
+        file_name="dataset.csv",
+        score=82,
+        grade="B",
+        verdict="Looks OK",
+        findings=[],
+        recommendations=[],
+    )
+    articles = {item["article"] for item in evidence["evidence"]}
+    markdown = build_eu_ai_act_evidence_markdown(evidence)
+
+    assert {"Article 9", "Article 10", "Article 11", "Article 12", "Article 15"}.issubset(articles)
+    assert "EU AI Act Evidence Mapping" in markdown
+    assert "Overall missingness" in markdown
+
+
 if __name__ == "__main__":
     test_compute_health_score_normalizes_custom_weights()
     test_compute_health_score_penalizes_key_findings()
     test_to_json_safe_converts_common_numpy_and_pandas_values()
     test_build_html_report_supports_image_reports()
+    test_eu_ai_act_evidence_maps_results_to_articles()

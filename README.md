@@ -59,6 +59,7 @@ Within a broader MLOps workflow, ASTRID fits naturally at the data-validation ga
 - **Configurable metric weights** — users can adjust the contribution of each dimension to the composite health score directly from the sidebar, with automatic normalisation so values do not need to sum to exactly 100.
 - **Automated recommendations** — after each analysis run ASTRID generates a prioritised list of plain-language remediation actions.
 - **HTML report export** — a self-contained HTML report can be downloaded after every analysis and shared with colleagues or archived as compliance evidence.
+- **EU AI Act evidence mapping** — tabular, time-series, and image reports map observed metrics to selected EU AI Act evidence areas such as data governance, record-keeping, transparency, and robustness.
 - **PII detection** — heuristic regex-based scanning flags columns or file paths that may contain personally-identifiable information such as email addresses, phone numbers, and national identifiers.
 - **Drift detection** — Kolmogorov–Smirnov statistics measure distribution shift between data slices (e.g., first vs. last temporal segment), flagging datasets where the underlying distribution has changed.
 - **Fairness analysis** — group-level disparity checks measure positive-rate differences across protected or demographic subgroups, surfacing potential bias before training.
@@ -363,6 +364,10 @@ Every analyzer makes the full analysis report available as a structured JSON obj
 ### HTML report
 
 The **⬇ Download HTML** button on the Export tab generates a self-contained HTML file that can be opened in any browser without an internet connection. It includes the verdict, health score, dimension breakdown, and a summary of findings and recommendations. Share this file with stakeholders or attach it to compliance documentation.
+
+### EU AI Act evidence report
+
+Each analyzer includes an **EU AI Act Evidence** section and downloadable Markdown/JSON evidence reports. These reports link ASTRID results to selected areas of Regulation (EU) 2024/1689, including Article 9 risk management, Article 10 data governance, Articles 11-12 documentation and record-keeping, Article 13 transparency, and Article 15 accuracy, robustness, and cybersecurity. The mapping is technical evidence only and is not a legal opinion or compliance certification.
 
 ---
 

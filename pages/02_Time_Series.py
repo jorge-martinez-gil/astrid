@@ -11,7 +11,9 @@ from utils import (
     compute_health_score, get_dimension_status, render_transparency_tab,
     build_html_report, build_markdown_report, PII_PATTERNS, infer_column_types,
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
-    DEFAULT_WEIGHTS
+    DEFAULT_WEIGHTS,
+    build_eu_ai_act_evidence, build_eu_ai_act_evidence_markdown,
+    render_eu_ai_act_evidence_section,
 )
 from audit_history import build_audit_record, evaluate_policy, save_audit_record
 
@@ -963,6 +965,17 @@ audit_record = build_audit_record(
     config=cfg_dict,
     score_components=score_components,
 )
+eu_ai_act_report = build_eu_ai_act_evidence(
+    analyzer="time_series",
+    report=safe_report,
+    cfg_dict=cfg_dict,
+    file_name=file_name,
+    score=score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+)
 policy_result = evaluate_policy(audit_record)
 try:
     audit_saved_path = save_audit_record(audit_record)
@@ -1015,8 +1028,8 @@ with c4: kpi("PII flags",   str(len(pii_cols)), f"{len(pii_cols)} col(s) flagged
              color="#ef4444" if pii_cols else "#22c55e")
 st.markdown("<br>", unsafe_allow_html=True)
 
-tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_exp = st.tabs(
-    ["Overview","Quality","Reliability","Robustness","Fairness","Transparency","Security","Export"])
+tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_eu, tab_exp = st.tabs(
+    ["Overview","Quality","Reliability","Robustness","Fairness","Transparency","Security","EU AI Act Evidence","Export"])
 
 with tab_ov:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
@@ -1222,6 +1235,9 @@ with tab_sec:
         st.info(f"Entity columns: {', '.join(s['identifiers']['entity_cols'])} — confirm these are allowed in reports.")
     st.markdown('</div>', unsafe_allow_html=True)
 
+with tab_eu:
+    render_eu_ai_act_evidence_section(eu_ai_act_report)
+
 with tab_exp:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Export")
@@ -1244,6 +1260,21 @@ with tab_exp:
         st.download_button("⬇ Download HTML", data=html_content.encode(), file_name="ts_report.html", mime="text/html", use_container_width=True)
     registry_payload = {"analyzer": "time_series", "threshold_docs": THRESHOLD_DOCS, "metric_docs": METRIC_DOCS}
     st.download_button("⬇ Download metric registry JSON", data=json.dumps(to_json_safe(registry_payload), indent=2, ensure_ascii=False).encode("utf-8"), file_name="time_series_metric_registry.json", mime="application/json", use_container_width=True)
+    st.markdown("**EU AI Act evidence report**")
+    st.download_button(
+        "⬇ Download EU AI Act evidence (Markdown)",
+        data=build_eu_ai_act_evidence_markdown(eu_ai_act_report).encode("utf-8"),
+        file_name="time_series_eu_ai_act_evidence.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    st.download_button(
+        "⬇ Download EU AI Act evidence (JSON)",
+        data=json.dumps(eu_ai_act_report, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="time_series_eu_ai_act_evidence.json",
+        mime="application/json",
+        use_container_width=True,
+    )
     with st.expander("Raw JSON (preview)"):
         st.json(safe_report)
     st.markdown('</div>', unsafe_allow_html=True)

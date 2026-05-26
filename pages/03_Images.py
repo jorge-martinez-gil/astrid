@@ -65,7 +65,14 @@ except Exception:
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 try:
-    from utils import SHARED_CSS, build_html_report, sha256_bytes as _sha256_util, badge as _badge_util, kpi as _kpi_util, health_ring_html, progress_bar_html, compute_health_score, to_json_safe as _to_json_safe_util, DEFAULT_WEIGHTS
+    from utils import (
+        SHARED_CSS, build_html_report, sha256_bytes as _sha256_util,
+        badge as _badge_util, kpi as _kpi_util, health_ring_html,
+        progress_bar_html, compute_health_score,
+        to_json_safe as _to_json_safe_util, DEFAULT_WEIGHTS,
+        build_eu_ai_act_evidence, build_eu_ai_act_evidence_markdown,
+        render_eu_ai_act_evidence_section,
+    )
     HAS_UTILS = True
 except Exception:
     HAS_UTILS = False
@@ -2731,6 +2738,17 @@ audit_record = build_audit_record(
     config=audit_config,
     score_components=score_details,
 )
+eu_ai_act_report = build_eu_ai_act_evidence(
+    analyzer="images",
+    report=safe_report,
+    cfg_dict=audit_config,
+    file_name=zip_up.name or "images.zip",
+    score=total_score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+)
 policy_result = evaluate_policy(audit_record)
 try:
     audit_saved_path = save_audit_record(audit_record)
@@ -2810,8 +2828,8 @@ st.write("")
 # TABS
 # =========================
 
-tab_overview, tab_quality, tab_reliability, tab_robustness, tab_fairness, tab_transparency, tab_security, tab_export = st.tabs(
-    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "Export"]
+tab_overview, tab_quality, tab_reliability, tab_robustness, tab_fairness, tab_transparency, tab_security, tab_eu, tab_export = st.tabs(
+    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "EU AI Act Evidence", "Export"]
 )
 
 with tab_overview:
@@ -3136,6 +3154,9 @@ with tab_security:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+with tab_eu:
+    render_eu_ai_act_evidence_section(eu_ai_act_report)
+
 with tab_export:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Export")
@@ -3246,6 +3267,22 @@ with tab_export:
                                mime="text/html", use_container_width=True)
         except Exception as exc:
             st.warning(f"HTML export unavailable for image reports in this build ({exc}).")
+
+    st.markdown("**EU AI Act evidence report**")
+    st.download_button(
+        "Download EU AI Act evidence (Markdown)",
+        data=build_eu_ai_act_evidence_markdown(eu_ai_act_report).encode("utf-8"),
+        file_name="image_eu_ai_act_evidence.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    st.download_button(
+        "Download EU AI Act evidence (JSON)",
+        data=json.dumps(eu_ai_act_report, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="image_eu_ai_act_evidence.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
     with st.expander("Raw JSON (preview)"):
         st.json(safe_report)
