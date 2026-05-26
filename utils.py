@@ -859,16 +859,38 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
                        verdict, reasons, recs, score, grade):
     """Generate a standalone HTML report."""
     sha = sha256_bytes(file_bytes)
-    pii_cols = report["security"]["confidentiality_pii_heuristics"].get("columns_with_hits", {})
-    miss_rate = report["quality"]["missingness"]["overall_missing_rate"]
-    dup_rate = report["quality"]["duplicates"]["exact_duplicate_row_rate"]
+    quality = report.get("quality", {}) if isinstance(report, dict) else {}
+    reliability = report.get("reliability", {}) if isinstance(report, dict) else {}
+    security = report.get("security", {}) if isinstance(report, dict) else {}
+    thresholds = cfg_dict.get("thresholds", {}) if isinstance(cfg_dict.get("thresholds"), dict) else {}
+
+    pii_cols = security.get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
+    miss_rate = quality.get("missingness", {}).get("overall_missing_rate", 0.0) or 0.0
+    dup_info = quality.get("duplicates", {})
+    dup_rate = (
+        dup_info.get("exact_duplicate_row_rate")
+        if isinstance(dup_info, dict)
+        else None
+    )
+    if dup_rate is None and isinstance(dup_info, dict):
+        dup_rate = dup_info.get("exact_duplicate_rate")
+    if dup_rate is None:
+        dup_rate = quality.get("exact_duplicate_row_rate", 0.0)
+    dup_rate = dup_rate or 0.0
 
     score_color = "#22c55e" if score >= 80 else ("#f59e0b" if score >= 60 else "#ef4444")
     reasons_html = "".join(f"<li>{r}</li>" for r in reasons)
     recs_html = "".join(f"<li>{r}</li>" for r in recs)
+    is_image_report = (
+        "path_in_zip" in getattr(df, "columns", [])
+        or bool(report.get("transparency", {}).get("dataset_identity"))
+    )
 
-    drift = report.get("reliability", {}).get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
-    thr = cfg_dict.get("drift_ks_threshold", 0.3)
+    drift = reliability.get("numeric_drift_ks_first_last", {}).get(
+        "top_10_ks",
+        reliability.get("feature_drift_ks_first_last", {}).get("top_10_ks", {}),
+    )
+    thr = cfg_dict.get("drift_ks_threshold", thresholds.get("drift_ks_threshold", 0.3))
     drift_rows = "".join(
         f"<tr><td>{col}</td><td>{float(val):.4f}</td>"
         f"<td style='color:{('#f59e0b' if float(val) > thr else '#22c55e')}'>"
@@ -876,7 +898,7 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
         for col, val in drift.items() if val is not None
     )
 
-    miss_top = report["quality"]["missingness"]["top_10_columns_missing_rate"]
+    miss_top = quality.get("missingness", {}).get("top_10_columns_missing_rate", {})
     miss_rows = "".join(f"<tr><td>{col}</td><td>{val:.2%}</td></tr>" for col, val in miss_top.items())
 
     pii_rows = ""
@@ -890,6 +912,26 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
 
     drift_section = (f"<h2>Numeric Drift (KS)</h2><table><tr><th>Column</th><th>KS Statistic</th><th>Status</th></tr>{drift_rows}</table>" if drift_rows else "")
     pii_section = (f"<h2>PII Findings</h2><table><tr><th>Column</th><th>Pattern</th><th>Hit Rate</th></tr>{pii_rows}</table>" if pii_rows else "")
+    image_section = ""
+    if is_image_report:
+        def pct(value):
+            try:
+                return f"{float(value):.2%}"
+            except (TypeError, ValueError):
+                return "N/A"
+
+        image_rows = [
+            ("Readability", pct(quality.get("readability", {}).get("readability_rate"))),
+            ("Corrupt image rate", pct(quality.get("readability", {}).get("corrupt_rate"))),
+            ("Low-resolution rate", pct(quality.get("low_resolution", {}).get("low_res_rate"))),
+            ("Exact duplicate rate", pct(dup_rate)),
+            ("Metadata completeness", pct(quality.get("metadata_completeness", {}).get("metadata_completeness"))),
+        ]
+        image_section = (
+            "<h2>Image Quality Signals</h2><table><tr><th>Metric</th><th>Value</th></tr>"
+            + "".join(f"<tr><td>{name}</td><td>{value}</td></tr>" for name, value in image_rows)
+            + "</table>"
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -932,6 +974,7 @@ footer {{ margin-top: 48px; color: #475569; font-size: 0.78rem; border-top: 1px 
 </div>
 <h2>Findings</h2><ul>{reasons_html}</ul>
 <h2>Recommended Actions</h2><ul>{recs_html}</ul>
+{image_section}
 <h2>Missingness — Top Columns</h2><table><tr><th>Column</th><th>Missing Rate</th></tr>{miss_rows}</table>
 {drift_section}
 {pii_section}

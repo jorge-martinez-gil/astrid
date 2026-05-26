@@ -15,13 +15,13 @@ APP_VERSION = "1.0"
 HISTORY_DIR = Path(__file__).resolve().parent / "audit_runs"
 
 DEFAULT_POLICY: Dict[str, Any] = {
-    "min_health_score": 80,
-    "max_missingness": 0.05,
-    "max_duplicate_rate": 0.01,
+    "min_health_score": 65,
+    "max_missingness": 0.15,
+    "max_duplicate_rate": 0.08,
     "allow_pii": False,
-    "max_split_leakage": 0.0,
-    "max_drift_ks": 0.30,
-    "max_positive_rate_disparity": 0.20,
+    "max_split_leakage": 0.01,
+    "max_drift_ks": 0.50,
+    "max_positive_rate_disparity": 0.40,
 }
 
 POLICY_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -36,13 +36,13 @@ POLICY_PRESETS: Dict[str, Dict[str, Any]] = {
     },
     "Balanced (default)": dict(DEFAULT_POLICY),
     "Lenient development": {
-        "min_health_score": 70,
-        "max_missingness": 0.10,
-        "max_duplicate_rate": 0.05,
+        "min_health_score": 55,
+        "max_missingness": 0.25,
+        "max_duplicate_rate": 0.15,
         "allow_pii": False,
-        "max_split_leakage": 0.0,
-        "max_drift_ks": 0.45,
-        "max_positive_rate_disparity": 0.35,
+        "max_split_leakage": 0.03,
+        "max_drift_ks": 0.65,
+        "max_positive_rate_disparity": 0.55,
     },
     "Exploratory research": {
         "min_health_score": 60,
@@ -57,8 +57,8 @@ POLICY_PRESETS: Dict[str, Dict[str, Any]] = {
 
 POLICY_PRESET_DESCRIPTIONS: Dict[str, str] = {
     "Strict production": "Release gate for high-risk or regulated datasets.",
-    "Balanced (default)": "Default gate used by ASTRID reports and experiments.",
-    "Lenient development": "Development gate that relaxes noisy quality and drift checks while keeping PII and leakage strict.",
+    "Balanced (default)": "Default review gate for routine audits; tolerant of noisy development datasets while keeping PII strict.",
+    "Lenient development": "Development gate that relaxes noisy quality, leakage, fairness, and drift checks while keeping PII strict.",
     "Exploratory research": "Research-only gate for stress tests and demos; not recommended for deployment decisions.",
 }
 

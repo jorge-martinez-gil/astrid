@@ -87,13 +87,14 @@ def test_policy_gate_fails_risky_record():
 def test_policy_gate_can_be_relaxed_with_preset():
     record = _record(
         _report(
-            missingness=0.08,
-            duplicate_rate=0.03,
-            drift=0.40,
-            positive_rate_disparity=0.30,
+            missingness=0.20,
+            duplicate_rate=0.10,
+            leakage=0.02,
+            drift=0.60,
+            positive_rate_disparity=0.50,
         ),
-        score=72,
-        grade="C",
+        score=60,
+        grade="D",
     )
 
     assert evaluate_policy(record)["status"] == "FAIL"

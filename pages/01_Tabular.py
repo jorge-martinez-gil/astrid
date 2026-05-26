@@ -12,14 +12,7 @@ from utils import (
     numeric_cols, categorical_cols, approx_iqr_outlier_rate, ks_statistic,
     to_datetime_if_possible, DEFAULT_WEIGHTS
 )
-from audit_history import (
-    DEFAULT_POLICY,
-    POLICY_PRESETS,
-    POLICY_PRESET_DESCRIPTIONS,
-    build_audit_record,
-    evaluate_policy,
-    save_audit_record,
-)
+from audit_history import build_audit_record, save_audit_record
 
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -548,69 +541,6 @@ with st.sidebar:
         "fairness":    st.session_state.get("weight_fairness",    DEFAULT_WEIGHTS["fairness"]),
     }
 
-    with st.expander("Policy Gate", expanded=False):
-        st.caption("Choose how strict the pass/fail gate should be for this run.")
-        policy_preset_name = st.selectbox(
-            "Gate preset",
-            list(POLICY_PRESETS.keys()),
-            index=list(POLICY_PRESETS.keys()).index("Balanced (default)"),
-        )
-        policy_defaults = POLICY_PRESETS.get(policy_preset_name, DEFAULT_POLICY)
-        st.caption(POLICY_PRESET_DESCRIPTIONS.get(policy_preset_name, ""))
-        active_policy = {
-            "min_health_score": st.number_input(
-                "Minimum health score",
-                min_value=0,
-                max_value=100,
-                value=int(policy_defaults["min_health_score"]),
-                step=1,
-            ),
-            "max_missingness": st.number_input(
-                "Max missingness",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(policy_defaults["max_missingness"]),
-                step=0.01,
-                format="%.3f",
-            ),
-            "max_duplicate_rate": st.number_input(
-                "Max duplicate rate",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(policy_defaults["max_duplicate_rate"]),
-                step=0.01,
-                format="%.3f",
-            ),
-            "max_split_leakage": st.number_input(
-                "Max split leakage",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(policy_defaults["max_split_leakage"]),
-                step=0.001,
-                format="%.4f",
-            ),
-            "max_drift_ks": st.number_input(
-                "Max drift KS",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(policy_defaults["max_drift_ks"]),
-                step=0.01,
-                format="%.3f",
-            ),
-            "max_positive_rate_disparity": st.number_input(
-                "Max positive-rate disparity",
-                min_value=0.0,
-                max_value=1.0,
-                value=float(policy_defaults["max_positive_rate_disparity"]),
-                step=0.01,
-                format="%.3f",
-            ),
-            "allow_pii": st.toggle(
-                "Allow PII flags",
-                value=bool(policy_defaults["allow_pii"]),
-            ),
-        }
-
     st.divider()
     run = st.button("🔬 Run analysis", type="primary", use_container_width=True)
 
@@ -666,8 +596,6 @@ dim_status = get_dimension_status(report, th.drift_ks_threshold)
 
 cfg_dict = {
     "mode": mode, "preset": preset_name,
-    "policy_preset": policy_preset_name,
-    "policy": active_policy,
     "drift_ks_threshold": th.drift_ks_threshold,
     "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
     "label_col": label_col, "split_col": split_col, "time_col": time_col,
@@ -696,7 +624,6 @@ audit_record = build_audit_record(
     config=cfg_dict,
     score_components=score_components,
 )
-policy_result = evaluate_policy(audit_record, policy=active_policy)
 try:
     audit_saved_path = save_audit_record(audit_record)
 except OSError:
@@ -713,14 +640,12 @@ st.markdown(f"""
         <div class="muted" style="margin-top:4px;">
         Mode: <span class="code-pill">{mode}</span>
         &nbsp; Preset: <span class="code-pill">{preset_name}</span>
-        &nbsp; Gate: <span class="code-pill">{policy_preset_name}</span>
       </div>
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
       {badge(verdict, vkind)}
       {badge(f"Score {score}/100", 'ok' if score>=80 else ('warn' if score>=60 else 'bad'))}
       {badge(f"Grade {grade}", 'ok' if grade in ('A','B') else ('warn' if grade=='C' else 'bad'))}
-      {badge(f"Gate {policy_result['status']}", 'ok' if policy_result['status']=='PASS' else 'bad')}
     </div>
   </div>
   <hr>

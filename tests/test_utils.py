@@ -7,7 +7,7 @@ import pandas as pd
 
 sys.modules.setdefault("streamlit", types.ModuleType("streamlit"))
 
-from utils import compute_health_score, to_json_safe
+from utils import build_html_report, compute_health_score, to_json_safe
 
 
 def test_compute_health_score_normalizes_custom_weights():
@@ -85,7 +85,53 @@ def test_to_json_safe_converts_common_numpy_and_pandas_values():
     }
 
 
+def test_build_html_report_supports_image_reports():
+    df = pd.DataFrame(
+        {
+            "path_in_zip": ["train/a.jpg", "train/b.jpg"],
+            "open_ok": [True, True],
+        }
+    )
+    report = {
+        "quality": {
+            "readability": {"readability_rate": 1.0, "corrupt_rate": 0.0},
+            "missingness": {
+                "overall_missing_rate": 0.0,
+                "top_10_columns_missing_rate": {},
+            },
+            "duplicates": {"exact_duplicate_rate": 0.0},
+            "low_resolution": {"low_res_rate": 0.0},
+            "metadata_completeness": {"metadata_completeness": 1.0},
+        },
+        "reliability": {
+            "feature_drift_ks_first_last": {"top_10_ks": {"brightness": 0.10}}
+        },
+        "security": {
+            "confidentiality_pii_heuristics": {"columns_with_hits": {}},
+        },
+        "transparency": {"dataset_identity": {"total_images": 2}},
+    }
+
+    html = build_html_report(
+        df=df,
+        report=report,
+        cfg_dict={"mode": "Quick Scan", "preset": "Balanced", "thresholds": {"drift_ks_threshold": 0.3}},
+        file_name="images.zip",
+        file_bytes=b"fake zip bytes",
+        verdict="Looks OK",
+        reasons=["No major red flags."],
+        recs=["Archive the report."],
+        score=95,
+        grade="A",
+    )
+
+    assert "Image Quality Signals" in html
+    assert "images.zip" in html
+    assert "SHA-256" in html
+
+
 if __name__ == "__main__":
     test_compute_health_score_normalizes_custom_weights()
     test_compute_health_score_penalizes_key_findings()
     test_to_json_safe_converts_common_numpy_and_pandas_values()
+    test_build_html_report_supports_image_reports()
