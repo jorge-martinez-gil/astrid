@@ -512,6 +512,71 @@ EU_AI_ACT_ARTICLE_REFERENCES: Dict[str, Dict[str, str]] = {
     },
 }
 
+ISO_25012_SOURCE_URL = "https://www.iso.org/standard/35736.html"
+
+ISO_25012_CHARACTERISTICS: Dict[str, Dict[str, str]] = {
+    "Accuracy": {
+        "perspective": "Inherent",
+        "aspect": "Degree to which data correctly represent the intended real-world values.",
+    },
+    "Completeness": {
+        "perspective": "Inherent",
+        "aspect": "Degree to which expected data values are present.",
+    },
+    "Consistency": {
+        "perspective": "Inherent",
+        "aspect": "Degree to which data are free from contradiction across records, fields, or rules.",
+    },
+    "Credibility": {
+        "perspective": "Inherent",
+        "aspect": "Degree to which data are regarded as trustworthy and authentic.",
+    },
+    "Currentness": {
+        "perspective": "Inherent",
+        "aspect": "Degree to which data are sufficiently up to date for their intended use.",
+    },
+    "Accessibility": {
+        "perspective": "System-dependent",
+        "aspect": "Degree to which data can be accessed in the expected context of use.",
+    },
+    "Compliance": {
+        "perspective": "Both",
+        "aspect": "Degree to which data meet applicable rules, standards, or conventions.",
+    },
+    "Confidentiality": {
+        "perspective": "Both",
+        "aspect": "Degree to which data are protected from unauthorized disclosure.",
+    },
+    "Efficiency": {
+        "perspective": "Both",
+        "aspect": "Degree to which data can be processed using appropriate resources.",
+    },
+    "Precision": {
+        "perspective": "Both",
+        "aspect": "Degree to which data have the exactness needed for their intended use.",
+    },
+    "Traceability": {
+        "perspective": "Both",
+        "aspect": "Degree to which data access, changes, origin, and processing can be traced.",
+    },
+    "Understandability": {
+        "perspective": "Both",
+        "aspect": "Degree to which data meaning and context are clear to users.",
+    },
+    "Availability": {
+        "perspective": "System-dependent",
+        "aspect": "Degree to which data are available for authorized use when required.",
+    },
+    "Portability": {
+        "perspective": "System-dependent",
+        "aspect": "Degree to which data can be moved or reused across environments.",
+    },
+    "Recoverability": {
+        "perspective": "System-dependent",
+        "aspect": "Degree to which data can be restored and verified after failure.",
+    },
+}
+
 
 def compute_health_score(
     report: Dict[str, Any],
@@ -1063,6 +1128,245 @@ def render_eu_ai_act_evidence_section(evidence_report: Dict[str, Any]) -> None:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
         st.info("No EU AI Act evidence items could be mapped for this report.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _iso_add_item(
+    items: List[Dict[str, Any]],
+    *,
+    characteristic: str,
+    metric: str,
+    evidence_path: str,
+    value: Any,
+    interpretation: str,
+    threshold: Optional[float] = None,
+    percent: bool = False,
+    higher_is_risk: bool = True,
+) -> None:
+    if value is None:
+        return
+    ref = ISO_25012_CHARACTERISTICS[characteristic]
+    items.append(
+        {
+            "characteristic": characteristic,
+            "perspective": ref["perspective"],
+            "quality_aspect": ref["aspect"],
+            "metric": metric,
+            "evidence_path": evidence_path,
+            "observed_value": _eu_format_value(value, percent=percent),
+            "raw_value": to_json_safe(value),
+            "threshold": None if threshold is None else _eu_format_value(threshold, percent=percent),
+            "status": _eu_status(value, threshold, higher_is_risk=higher_is_risk),
+            "interpretation": interpretation,
+        }
+    )
+
+
+def build_iso_25012_evidence(
+    *,
+    analyzer: str,
+    report: Dict[str, Any],
+    cfg_dict: Optional[Dict[str, Any]] = None,
+    file_name: Optional[str] = None,
+    score: Optional[int] = None,
+    grade: Optional[str] = None,
+    verdict: Optional[str] = None,
+    findings: Optional[List[str]] = None,
+    recommendations: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Map ASTRID results to ISO/IEC 25012 data-quality characteristics."""
+    cfg_dict = cfg_dict or {}
+    findings = findings or []
+    recommendations = recommendations or []
+    thresholds = cfg_dict.get("thresholds", {}) if isinstance(cfg_dict.get("thresholds"), dict) else {}
+    drift_threshold = _eu_as_float(
+        cfg_dict.get("drift_ks_threshold", thresholds.get("drift_ks_threshold", 0.30))
+    )
+    items: List[Dict[str, Any]] = []
+
+    path, value = _eu_first_path(
+        report,
+        [
+            "quality.annotation_schema_consistency.schema_consistency_rate",
+            "quality.bbox_validity.bbox_validity_rate",
+            "quality.time_axis_health.time_parse.parse_ok_rate",
+            "quality.label_agreement.exact_agreement_rate",
+        ],
+    )
+    _iso_add_item(items, characteristic="Accuracy", metric="Schema, annotation, or timestamp validity", evidence_path=path or "quality", value=value, threshold=0.95, percent=True, higher_is_risk=False, interpretation="Validity and agreement checks provide partial evidence that values or annotations are plausible and correctly structured.")
+
+    path, value = _eu_first_path(report, ["quality.missingness.overall_missing_rate"])
+    _iso_add_item(items, characteristic="Completeness", metric="Overall missingness", evidence_path=path or "quality.missingness.overall_missing_rate", value=value, threshold=0.15, percent=True, interpretation="Missingness is direct evidence for whether expected values are present.")
+    path, value = _eu_first_path(report, ["quality.metadata_completeness.metadata_completeness", "transparency.datasheet_completeness.completeness_rate"])
+    _iso_add_item(items, characteristic="Completeness", metric="Metadata or datasheet completeness", evidence_path=path or "quality.metadata_completeness", value=value, threshold=0.80, percent=True, higher_is_risk=False, interpretation="Metadata and datasheet completeness indicate whether context needed to use the data is present.")
+
+    path, value = _eu_first_path(report, ["quality.duplicates.exact_duplicate_row_rate", "quality.duplicates.exact_duplicate_rate", "quality.exact_duplicate_row_rate"])
+    _iso_add_item(items, characteristic="Consistency", metric="Exact duplicate rate", evidence_path=path or "quality.duplicates", value=value, threshold=0.08, percent=True, interpretation="Duplicate rows or assets can indicate inconsistent data collection, merging, or curation.")
+    path, value = _eu_first_path(report, ["quality.split_leakage.row_hash_cross_split_rate", "quality.cross_split_leakage.cross_split_leakage_rate", "quality.time_axis_health.duplicate_timestamps.duplicate_rate"])
+    _iso_add_item(items, characteristic="Consistency", metric="Cross-split leakage or duplicate timestamp rate", evidence_path=path or "quality", value=value, threshold=0.01, percent=True, interpretation="Leakage and duplicate time points are contradiction-style signals across dataset partitions or temporal keys.")
+
+    path, value = _eu_first_path(report, ["security.integrity.sha256", "security.integrity.sha256_zip"])
+    _iso_add_item(items, characteristic="Credibility", metric="Integrity fingerprint present", evidence_path=path or "security.integrity", value=bool(value), interpretation="A file fingerprint supports authenticity and later verification of the audited artifact.")
+    path, value = _eu_first_path(report, ["security.suspicious_samples.suspicious_sample_rate"])
+    _iso_add_item(items, characteristic="Credibility", metric="Suspicious sample rate", evidence_path=path or "security.suspicious_samples", value=value, threshold=0.05, percent=True, interpretation="Suspicious samples weaken trust in the dataset and should be reviewed.")
+
+    drift_path, drift_values = _eu_first_path(report, ["reliability.numeric_drift_ks_first_last.top_10_ks", "reliability.feature_drift_ks_first_last.top_10_ks"])
+    _iso_add_item(items, characteristic="Currentness", metric="Maximum drift statistic", evidence_path=drift_path or "reliability.*_drift_ks_first_last.top_10_ks", value=_eu_max_numeric(drift_values), threshold=drift_threshold, interpretation="Drift across time or slices is evidence that the data distribution may no longer reflect the intended context.")
+    path, value = _eu_first_path(report, ["quality.time_axis_health.time_range.span_days"])
+    _iso_add_item(items, characteristic="Currentness", metric="Temporal span", evidence_path=path or "quality.time_axis_health.time_range", value=value, interpretation="The observed temporal coverage helps reviewers judge whether the data are current enough for the use case.")
+
+    path, value = _eu_first_path(report, ["quality.readability.readability_rate", "quality.format_conformance.format_conformance_rate"])
+    _iso_add_item(items, characteristic="Accessibility", metric="Readability or format conformance", evidence_path=path or "quality.readability", value=value, threshold=0.99, percent=True, higher_is_risk=False, interpretation="Readable and conformant files are evidence that the data can be accessed in the expected processing context.")
+
+    _iso_add_item(items, characteristic="Compliance", metric="Configuration captured", evidence_path="config", value=bool(cfg_dict), interpretation="Captured configuration supports repeatable review against local rules and documented conventions.")
+    _iso_add_item(items, characteristic="Compliance", metric="Findings count", evidence_path="findings", value=len(findings), interpretation="Findings provide evidence of checks that may need policy or standard-specific review.")
+
+    pii_hits = _eu_get_path(report, "security.confidentiality_pii_heuristics.columns_with_hits")
+    _iso_add_item(items, characteristic="Confidentiality", metric="PII-like fields flagged", evidence_path="security.confidentiality_pii_heuristics.columns_with_hits", value=len(pii_hits) if isinstance(pii_hits, dict) else None, threshold=0, interpretation="PII-like patterns are direct confidentiality evidence and require legal or domain validation.")
+    path, value = _eu_first_path(report, ["security.exif_privacy.gps_images_count"])
+    _iso_add_item(items, characteristic="Confidentiality", metric="Images with GPS EXIF", evidence_path=path or "security.exif_privacy.gps_images_count", value=value, threshold=0, interpretation="GPS EXIF metadata can reveal sensitive location information.")
+
+    path, value = _eu_first_path(report, ["security.availability_asset_checks.byte_size", "security.integrity.zip_byte_size", "transparency.dataset_identity.zip_byte_size"])
+    _iso_add_item(items, characteristic="Efficiency", metric="Audited artifact byte size", evidence_path=path or "security.availability_asset_checks.byte_size", value=value, interpretation="File size and audited scope are resource-planning evidence for processing efficiency.")
+    path, value = _eu_first_path(report, ["reliability.schema_consistency.num_rows", "transparency.dataset_identity.total_images"])
+    _iso_add_item(items, characteristic="Efficiency", metric="Audited item count", evidence_path=path or "reliability.schema_consistency.num_rows", value=value, interpretation="Row or item count gives operational context for processing and review cost.")
+
+    path, value = _eu_first_path(report, ["robustness.row_anomaly_score_mad.p99", "robustness.image_feature_outliers_mad.outlier_rate", "quality.blur_proxy.low_blur_rate"])
+    _iso_add_item(items, characteristic="Precision", metric="Outlier, anomaly, or blur signal", evidence_path=path or "robustness", value=value, interpretation="Outlier and blur signals provide partial evidence about measurement exactness and data fidelity.")
+
+    path, value = _eu_first_path(report, ["transparency.traceability_coverage.coverage_rate", "transparency.source_attribution_coverage.coverage_rate", "security.integrity.sha256", "security.integrity.sha256_zip"])
+    _iso_add_item(items, characteristic="Traceability", metric="Traceability, source attribution, or fingerprint", evidence_path=path or "transparency.traceability_coverage", value=value, threshold=0.80 if _eu_as_float(value) is not None else None, percent=_eu_as_float(value) is not None, higher_is_risk=False, interpretation="Traceability evidence links the data to origins, identifiers, or verifiable fingerprints.")
+
+    path, value = _eu_first_path(report, ["transparency.datasheet_completeness.completeness_rate", "quality.metadata_completeness.metadata_completeness"])
+    _iso_add_item(items, characteristic="Understandability", metric="Documentation completeness", evidence_path=path or "transparency.datasheet_completeness", value=value, threshold=0.80, percent=True, higher_is_risk=False, interpretation="Documentation and metadata make the data meaning, limitations, and intended use easier to understand.")
+    _iso_add_item(items, characteristic="Understandability", metric="Metric registry/configuration captured", evidence_path="config", value=bool(cfg_dict), interpretation="Stored configuration and metric registries help reviewers understand how the audit was produced.")
+
+    path, value = _eu_first_path(report, ["quality.readability.corrupt_rate", "security.suspicious_samples.suspicious_sample_rate"])
+    _iso_add_item(items, characteristic="Availability", metric="Corrupt or suspicious sample rate", evidence_path=path or "quality.readability.corrupt_rate", value=value, threshold=0.01, percent=True, interpretation="Unreadable or suspicious samples reduce data availability for authorized use.")
+    path, value = _eu_first_path(report, ["quality.readability.readability_rate"])
+    _iso_add_item(items, characteristic="Availability", metric="Readability rate", evidence_path=path or "quality.readability.readability_rate", value=value, threshold=0.99, percent=True, higher_is_risk=False, interpretation="Readability is direct evidence that data items are available to the analysis pipeline.")
+
+    path, value = _eu_first_path(report, ["quality.format_conformance.format_conformance_rate", "reliability.schema_consistency.num_cols"])
+    _iso_add_item(items, characteristic="Portability", metric="Format conformance or schema width", evidence_path=path or "quality.format_conformance", value=value, threshold=0.99 if path and "format_conformance" in path else None, percent=bool(path and "format_conformance" in path), higher_is_risk=False, interpretation="Format conformance and schema description support movement across tools and environments.")
+
+    path, value = _eu_first_path(report, ["security.integrity.sha256", "security.integrity.sha256_zip"])
+    _iso_add_item(items, characteristic="Recoverability", metric="Recovery verification fingerprint", evidence_path=path or "security.integrity", value=bool(value), interpretation="A fingerprint does not recover data by itself, but it supports verification after restore or transfer.")
+
+    covered = {item["characteristic"] for item in items}
+    gaps = [
+        {
+            "characteristic": name,
+            "perspective": ref["perspective"],
+            "quality_aspect": ref["aspect"],
+            "gap": "No direct ASTRID evidence was mapped for this run.",
+        }
+        for name, ref in ISO_25012_CHARACTERISTICS.items()
+        if name not in covered
+    ]
+    return to_json_safe(
+        {
+            "title": "ISO/IEC 25012 Evidence Mapping",
+            "source": ISO_25012_SOURCE_URL,
+            "standards_disclaimer": "This report maps ASTRID technical evidence to ISO/IEC 25012 data-quality characteristics. It is not a formal conformity assessment or certification.",
+            "analyzer": analyzer,
+            "dataset_name": file_name,
+            "summary": {"score": score, "grade": grade, "verdict": verdict, "findings_count": len(findings), "recommendations_count": len(recommendations)},
+            "characteristic_references": ISO_25012_CHARACTERISTICS,
+            "evidence": items,
+            "coverage_gaps": gaps,
+        }
+    )
+
+
+def build_iso_25012_evidence_markdown(evidence_report: Dict[str, Any]) -> str:
+    def cell(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "# ISO/IEC 25012 Evidence Mapping",
+        "",
+        evidence_report.get("standards_disclaimer", ""),
+        "",
+        f"- **Source:** {evidence_report.get('source', ISO_25012_SOURCE_URL)}",
+        f"- **Analyzer:** {evidence_report.get('analyzer', '')}",
+        f"- **Dataset:** {evidence_report.get('dataset_name', '')}",
+        "",
+        "## Run summary",
+        "",
+    ]
+    for key, value in evidence_report.get("summary", {}).items():
+        lines.append(f"- **{key.replace('_', ' ').title()}:** {value}")
+    lines += [
+        "",
+        "## Evidence map",
+        "",
+        "| ISO/IEC 25012 characteristic | Perspective | Metric | Observed value | Threshold | Status | Evidence path | Interpretation |",
+        "| --- | --- | --- | ---: | ---: | --- | --- | --- |",
+    ]
+    for item in evidence_report.get("evidence", []):
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    cell(item.get("characteristic", "")),
+                    cell(item.get("perspective", "")),
+                    cell(item.get("metric", "")),
+                    cell(item.get("observed_value", "")),
+                    cell(item.get("threshold") or ""),
+                    cell(item.get("status", "")),
+                    cell(item.get("evidence_path", "")),
+                    cell(item.get("interpretation", "")),
+                ]
+            )
+            + " |"
+        )
+    gaps = evidence_report.get("coverage_gaps", [])
+    if gaps:
+        lines += ["", "## Coverage gaps", ""]
+        for gap in gaps:
+            lines.append(f"- **{gap.get('characteristic')} ({gap.get('perspective')}):** {gap.get('gap')}")
+    lines += ["", "## Characteristic reference areas", ""]
+    for name, ref in evidence_report.get("characteristic_references", {}).items():
+        lines.append(f"- **{name} ({ref.get('perspective')}):** {ref.get('aspect')}")
+    return "\n".join(lines)
+
+
+def render_iso_25012_evidence_section(evidence_report: Dict[str, Any]) -> None:
+    if st is None:
+        return
+    st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
+    st.subheader("ISO/IEC 25012 Evidence")
+    st.caption(evidence_report.get("standards_disclaimer", ""))
+    st.markdown(f"Official source: [{ISO_25012_SOURCE_URL}]({ISO_25012_SOURCE_URL})")
+    summary = evidence_report.get("summary", {})
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Mapped evidence items", len(evidence_report.get("evidence", [])))
+    with c2:
+        st.metric("Coverage gaps", len(evidence_report.get("coverage_gaps", [])))
+    with c3:
+        st.metric("Grade", summary.get("grade") or "N/A")
+    rows = [
+        {
+            "Characteristic": item.get("characteristic"),
+            "Perspective": item.get("perspective"),
+            "Metric": item.get("metric"),
+            "Observed value": item.get("observed_value"),
+            "Threshold": item.get("threshold") or "",
+            "Status": item.get("status"),
+            "Evidence path": item.get("evidence_path"),
+            "Interpretation": item.get("interpretation"),
+        }
+        for item in evidence_report.get("evidence", [])
+    ]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No ISO/IEC 25012 evidence items could be mapped for this report.")
+    gaps = evidence_report.get("coverage_gaps", [])
+    if gaps:
+        with st.expander("Coverage gaps"):
+            st.dataframe(pd.DataFrame(gaps), use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 

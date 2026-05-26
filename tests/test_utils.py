@@ -11,6 +11,8 @@ from utils import (
     build_eu_ai_act_evidence,
     build_eu_ai_act_evidence_markdown,
     build_html_report,
+    build_iso_25012_evidence,
+    build_iso_25012_evidence_markdown,
     compute_health_score,
     to_json_safe,
 )
@@ -171,9 +173,49 @@ def test_eu_ai_act_evidence_maps_results_to_articles():
     assert "Overall missingness" in markdown
 
 
+def test_iso_25012_evidence_maps_results_to_characteristics():
+    report = {
+        "quality": {
+            "missingness": {"overall_missing_rate": 0.04},
+            "duplicates": {"exact_duplicate_row_rate": 0.01},
+            "split_leakage": {"row_hash_cross_split_rate": 0.0},
+            "label_agreement": {"exact_agreement_rate": 0.96},
+        },
+        "reliability": {
+            "numeric_drift_ks_first_last": {"top_10_ks": {"sensor": 0.18}},
+            "schema_consistency": {"num_rows": 100, "num_cols": 5},
+        },
+        "robustness": {"row_anomaly_score_mad": {"p99": 2.0}},
+        "security": {
+            "integrity": {"sha256": "abc123"},
+            "availability_asset_checks": {"byte_size": 2048},
+            "confidentiality_pii_heuristics": {"columns_with_hits": {}},
+        },
+    }
+
+    evidence = build_iso_25012_evidence(
+        analyzer="tabular",
+        report=report,
+        cfg_dict={"drift_ks_threshold": 0.3},
+        file_name="dataset.csv",
+        score=91,
+        grade="A",
+        verdict="Looks OK",
+        findings=[],
+        recommendations=[],
+    )
+    characteristics = {item["characteristic"] for item in evidence["evidence"]}
+    markdown = build_iso_25012_evidence_markdown(evidence)
+
+    assert {"Completeness", "Consistency", "Confidentiality", "Traceability"}.issubset(characteristics)
+    assert "ISO/IEC 25012 Evidence Mapping" in markdown
+    assert "Coverage gaps" in markdown
+
+
 if __name__ == "__main__":
     test_compute_health_score_normalizes_custom_weights()
     test_compute_health_score_penalizes_key_findings()
     test_to_json_safe_converts_common_numpy_and_pandas_values()
     test_build_html_report_supports_image_reports()
     test_eu_ai_act_evidence_maps_results_to_articles()
+    test_iso_25012_evidence_maps_results_to_characteristics()

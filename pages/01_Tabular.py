@@ -13,6 +13,8 @@ from utils import (
     to_datetime_if_possible, DEFAULT_WEIGHTS,
     build_eu_ai_act_evidence, build_eu_ai_act_evidence_markdown,
     render_eu_ai_act_evidence_section,
+    build_iso_25012_evidence, build_iso_25012_evidence_markdown,
+    render_iso_25012_evidence_section,
 )
 from audit_history import build_audit_record, save_audit_record
 
@@ -637,6 +639,17 @@ eu_ai_act_report = build_eu_ai_act_evidence(
     findings=reasons,
     recommendations=recs,
 )
+iso_25012_report = build_iso_25012_evidence(
+    analyzer="tabular",
+    report=safe_report,
+    cfg_dict=cfg_dict,
+    file_name=file_name,
+    score=score,
+    grade=grade,
+    verdict=verdict,
+    findings=reasons,
+    recommendations=recs,
+)
 try:
     audit_saved_path = save_audit_record(audit_record)
 except OSError:
@@ -709,8 +722,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Tabs
 # ──────────────────────────────────────────────────────────────────────────────
 
-tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_eu, tab_exp = st.tabs(
-    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "EU AI Act Evidence", "Export"]
+tab_ov, tab_q, tab_r, tab_rb, tab_f, tab_t, tab_sec, tab_eu, tab_iso, tab_exp = st.tabs(
+    ["Overview", "Quality", "Reliability", "Robustness", "Fairness", "Transparency", "Security", "EU AI Act Evidence", "ISO/IEC 25012", "Export"]
 )
 
 # ── Overview ──────────────────────────────────────────────────────────────────
@@ -1065,6 +1078,9 @@ with tab_sec:
 with tab_eu:
     render_eu_ai_act_evidence_section(eu_ai_act_report)
 
+with tab_iso:
+    render_iso_25012_evidence_section(iso_25012_report)
+
 with tab_exp:
     st.markdown('<div class="dsa-card">', unsafe_allow_html=True)
     st.subheader("Export")
@@ -1119,6 +1135,21 @@ with tab_exp:
         "⬇ Download EU AI Act evidence (JSON)",
         data=json.dumps(eu_ai_act_report, indent=2, ensure_ascii=False).encode("utf-8"),
         file_name="tabular_eu_ai_act_evidence.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    st.markdown("**ISO/IEC 25012 evidence report**")
+    st.download_button(
+        "⬇ Download ISO/IEC 25012 evidence (Markdown)",
+        data=build_iso_25012_evidence_markdown(iso_25012_report).encode("utf-8"),
+        file_name="tabular_iso_25012_evidence.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    st.download_button(
+        "⬇ Download ISO/IEC 25012 evidence (JSON)",
+        data=json.dumps(iso_25012_report, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="tabular_iso_25012_evidence.json",
         mime="application/json",
         use_container_width=True,
     )
