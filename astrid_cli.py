@@ -23,7 +23,7 @@ from astrid_core import (
     make_tabular_config,
     read_tabular_file,
 )
-from audit_history import POLICY_PRESETS
+from audit_history import POLICY_PRESETS, save_audit_record
 from utils import build_html_report, build_markdown_report, to_json_safe
 
 
@@ -40,8 +40,8 @@ def _parser() -> argparse.ArgumentParser:
                        choices=list(TABULAR_PRESETS.keys()), help="Threshold preset")
     audit.add_argument("--mode", default="Quick Scan",
                        choices=["Quick Scan", "Full Scan"], help="Scan mode")
-    audit.add_argument("--policy", default=None,
-                       help=f"Policy gate preset (one of: {', '.join(POLICY_PRESETS.keys())})")
+    audit.add_argument("--policy", default=None, choices=list(POLICY_PRESETS.keys()),
+                       help="Policy gate preset")
     audit.add_argument("--label", default=None, help="Label column name (optional)")
     audit.add_argument("--split", default=None, help="Split column name (optional)")
     audit.add_argument("--time", default=None, help="Time column name (optional)")
@@ -57,6 +57,10 @@ def _parser() -> argparse.ArgumentParser:
                        help="Write Markdown report to this path")
     audit.add_argument("--html", dest="html_out", default=None,
                        help="Write HTML report to this path")
+    audit.add_argument("--save-history", action="store_true",
+                       help="Save the audit record to the local ASTRID audit history")
+    audit.add_argument("--history-dir", default=None,
+                       help="Directory for saved audit history records; implies --save-history")
     audit.add_argument("--quiet", "-q", action="store_true",
                        help="Suppress the human-readable summary on stdout")
     audit.add_argument("--exit-on-fail", action="store_true",
@@ -138,6 +142,17 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         Path(args.html_out).write_text(html, encoding="utf-8")
 
+    history_path = None
+    if args.save_history or args.history_dir:
+        try:
+            history_path = save_audit_record(
+                result["audit_record"],
+                Path(args.history_dir) if args.history_dir else None,
+            )
+        except OSError as exc:
+            print(f"Error: could not save audit history: {exc}", file=sys.stderr)
+            return 2
+
     if not args.quiet:
         print(f"ASTRID audit: {path.name}")
         print(f"  Rows × Cols: {df.shape[0]:,} × {df.shape[1]:,}")
@@ -150,6 +165,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         if args.policy:
             pol = result.get("policy_result", {})
             print(f"  Policy gate ({args.policy}): {pol.get('status', 'N/A')}")
+        if history_path:
+            print(f"  History:     {history_path}")
 
     if args.exit_on_fail:
         pol_status = (result.get("policy_result") or {}).get("status")

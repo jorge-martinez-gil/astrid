@@ -48,6 +48,26 @@ def test_compute_health_score_normalizes_custom_weights():
     assert math.isclose(sum(components.values()), 100.0)
 
 
+def test_compute_health_score_merges_partial_custom_weights_before_normalizing():
+    report = {
+        "quality": {
+            "missingness": {"overall_missing_rate": 1.0},
+            "duplicates": {"exact_duplicate_row_rate": 1.0},
+            "split_leakage": {"row_hash_cross_split_rate": 1.0},
+        },
+        "security": {"confidentiality_pii_heuristics": {"columns_with_hits": {}}},
+        "reliability": {"numeric_drift_ks_first_last": {"top_10_ks": {"sensor": 0.0}}},
+        "robustness": {"row_anomaly_score_mad": {"p99": 0.0}},
+        "fairness": {"group_checks": {"site": {"positive_rate_disparity": 0.0}}},
+    }
+
+    score, _, components = compute_health_score(report, weights={"quality": 100})
+
+    assert components["quality"] == 0.0
+    assert math.isclose(sum(components.values()), score, abs_tol=1.0)
+    assert score < 65
+
+
 def test_compute_health_score_penalizes_key_findings():
     report = {
         "quality": {
@@ -138,6 +158,55 @@ def test_build_html_report_supports_image_reports():
     assert "SHA-256" in html
 
 
+def test_build_html_report_escapes_dynamic_content():
+    df = pd.DataFrame(
+        {
+            "<script>alert(1)</script>": [None, 1],
+        }
+    )
+    report = {
+        "quality": {
+            "missingness": {
+                "overall_missing_rate": 0.5,
+                "top_10_columns_missing_rate": {"<img src=x onerror=alert(2)>": 0.5},
+            },
+            "duplicates": {"exact_duplicate_row_rate": 0.0},
+        },
+        "reliability": {
+            "numeric_drift_ks_first_last": {
+                "top_10_ks": {"<svg onload=alert(3)>": 0.4}
+            }
+        },
+        "security": {
+            "confidentiality_pii_heuristics": {
+                "columns_with_hits": {
+                    "<b>email</b>": {"<script>alert(4)</script>": 0.5}
+                }
+            }
+        },
+    }
+
+    html = build_html_report(
+        df=df,
+        report=report,
+        cfg_dict={"mode": "<b>mode</b>", "preset": "<b>preset</b>"},
+        file_name="<script>alert(5)</script>.csv",
+        file_bytes=b"fake csv bytes",
+        verdict="<img src=x onerror=alert(6)>",
+        reasons=["<script>alert(7)</script>"],
+        recs=["<b>fix</b>"],
+        score=12,
+        grade="F",
+    )
+
+    assert "<script>alert" not in html
+    assert "<img src=x" not in html
+    assert "<svg onload" not in html
+    assert "<b>fix</b>" not in html
+    assert "&lt;script&gt;alert" in html
+    assert "&lt;b&gt;fix&lt;/b&gt;" in html
+
+
 def test_eu_ai_act_evidence_maps_results_to_articles():
     report = {
         "quality": {
@@ -214,8 +283,10 @@ def test_iso_25012_evidence_maps_results_to_characteristics():
 
 if __name__ == "__main__":
     test_compute_health_score_normalizes_custom_weights()
+    test_compute_health_score_merges_partial_custom_weights_before_normalizing()
     test_compute_health_score_penalizes_key_findings()
     test_to_json_safe_converts_common_numpy_and_pandas_values()
     test_build_html_report_supports_image_reports()
+    test_build_html_report_escapes_dynamic_content()
     test_eu_ai_act_evidence_maps_results_to_articles()
     test_iso_25012_evidence_maps_results_to_characteristics()

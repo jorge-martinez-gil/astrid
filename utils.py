@@ -7,6 +7,7 @@ Import in each page with:
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -589,14 +590,22 @@ def compute_health_score(
     Pass a custom ``weights`` dict to override; values are normalised automatically so they
     do not need to sum to exactly 100.
     """
-    if weights is None:
-        weights = DEFAULT_WEIGHTS
+    effective_weights = dict(DEFAULT_WEIGHTS)
+    if weights is not None:
+        for dim, value in weights.items():
+            if dim in effective_weights:
+                try:
+                    effective_weights[dim] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    effective_weights[dim] = 0.0
 
-    # Normalise supplied weights so they always sum to 100
-    w_sum = sum(weights.values())
+    # Normalise the complete validated weight map so partial custom weights
+    # cannot accidentally reintroduce default points after normalisation.
+    w_sum = sum(effective_weights.values())
     if w_sum <= 0:
-        w_sum = 1.0
-    norm_w: Dict[str, float] = {k: v / w_sum * 100.0 for k, v in weights.items()}
+        effective_weights = dict(DEFAULT_WEIGHTS)
+        w_sum = sum(effective_weights.values())
+    norm_w: Dict[str, float] = {k: v / w_sum * 100.0 for k, v in effective_weights.items()}
 
     components: Dict[str, float] = {}
 
@@ -611,7 +620,7 @@ def compute_health_score(
     ]
     if leak is not None:
         q_scores.append(0.0 if float(leak) > 0 else 1.0)
-    components["quality"] = (sum(q_scores) / len(q_scores)) * norm_w.get("quality", 35)
+    components["quality"] = (sum(q_scores) / len(q_scores)) * norm_w["quality"]
 
     # Security — graduated by worst PII hit rate observed across columns.
     # Previously a single hit (even a regex false-positive) zeroed the
@@ -639,7 +648,7 @@ def compute_health_score(
                 except (TypeError, ValueError):
                     worst_rate = max(worst_rate, PII_SEVERE_HIT_RATE)
         s_score = max(0.0, 1.0 - worst_rate / PII_SEVERE_HIT_RATE)
-    components["security"] = s_score * norm_w.get("security", 25)
+    components["security"] = s_score * norm_w["security"]
 
     # Reliability
     r = report.get("reliability", {})
@@ -649,7 +658,7 @@ def compute_health_score(
         r_score = max(0.0, 1.0 - max_ks / max(drift_threshold, 0.01))
     else:
         r_score = 0.75  # unknown → neutral
-    components["reliability"] = r_score * norm_w.get("reliability", 20)
+    components["reliability"] = r_score * norm_w["reliability"]
 
     # Robustness
     rb = report.get("robustness", {})
@@ -658,12 +667,12 @@ def compute_health_score(
         rb_score = max(0.0, 1.0 - float(p99) / 20.0)
     else:
         rb_score = 0.75
-    components["robustness"] = rb_score * norm_w.get("robustness", 10)
+    components["robustness"] = rb_score * norm_w["robustness"]
 
     # Fairness
     f = report.get("fairness", {})
     if "note" in f:
-        components["fairness"] = 0.75 * norm_w.get("fairness", 10)
+        components["fairness"] = 0.75 * norm_w["fairness"]
     else:
         disp_scores = []
         for gcol, stats in f.get("group_checks", {}).items():
@@ -671,9 +680,9 @@ def compute_health_score(
             if disp is not None:
                 disp_scores.append(max(0.0, 1.0 - float(disp) / 0.5))
         components["fairness"] = (
-            (sum(disp_scores) / len(disp_scores)) * norm_w.get("fairness", 10)
+            (sum(disp_scores) / len(disp_scores)) * norm_w["fairness"]
             if disp_scores
-            else 0.75 * norm_w.get("fairness", 10)
+            else 0.75 * norm_w["fairness"]
         )
 
     total = round(min(100, max(0, sum(components.values()))))
@@ -1465,9 +1474,12 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
         dup_rate = quality.get("exact_duplicate_row_rate", 0.0)
     dup_rate = dup_rate or 0.0
 
+    def esc(value: Any) -> str:
+        return html.escape(str(value), quote=True)
+
     score_color = "#22c55e" if score >= 80 else ("#f59e0b" if score >= 60 else "#ef4444")
-    reasons_html = "".join(f"<li>{r}</li>" for r in reasons)
-    recs_html = "".join(f"<li>{r}</li>" for r in recs)
+    reasons_html = "".join(f"<li>{esc(r)}</li>" for r in reasons)
+    recs_html = "".join(f"<li>{esc(r)}</li>" for r in recs)
     is_image_report = (
         "path_in_zip" in getattr(df, "columns", [])
         or bool(report.get("transparency", {}).get("dataset_identity"))
@@ -1479,23 +1491,31 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
     )
     thr = cfg_dict.get("drift_ks_threshold", thresholds.get("drift_ks_threshold", 0.3))
     drift_rows = "".join(
-        f"<tr><td>{col}</td><td>{float(val):.4f}</td>"
+        f"<tr><td>{esc(col)}</td><td>{float(val):.4f}</td>"
         f"<td style='color:{('#f59e0b' if float(val) > thr else '#22c55e')}'>"
         f"{('Above threshold' if float(val) > thr else 'OK')}</td></tr>"
         for col, val in drift.items() if val is not None
     )
 
     miss_top = quality.get("missingness", {}).get("top_10_columns_missing_rate", {})
-    miss_rows = "".join(f"<tr><td>{col}</td><td>{val:.2%}</td></tr>" for col, val in miss_top.items())
+    miss_rows = "".join(
+        f"<tr><td>{esc(col)}</td><td>{val:.2%}</td></tr>" for col, val in miss_top.items()
+    )
 
     pii_rows = ""
     for col, hits in pii_cols.items():
         if isinstance(hits, dict):
             for pattern, rate in hits.items():
                 try:
-                    pii_rows += f"<tr><td>{col}</td><td>{pattern}</td><td>{float(rate):.2%}</td></tr>"
+                    pii_rows += (
+                        f"<tr><td>{esc(col)}</td><td>{esc(pattern)}</td>"
+                        f"<td>{float(rate):.2%}</td></tr>"
+                    )
                 except (TypeError, ValueError):
-                    pii_rows += f"<tr><td>{col}</td><td>{pattern}</td><td>{rate}</td></tr>"
+                    pii_rows += (
+                        f"<tr><td>{esc(col)}</td><td>{esc(pattern)}</td>"
+                        f"<td>{esc(rate)}</td></tr>"
+                    )
 
     drift_section = (f"<h2>Numeric Drift (KS)</h2><table><tr><th>Column</th><th>KS Statistic</th><th>Status</th></tr>{drift_rows}</table>" if drift_rows else "")
     pii_section = (f"<h2>PII Findings</h2><table><tr><th>Column</th><th>Pattern</th><th>Hit Rate</th></tr>{pii_rows}</table>" if pii_rows else "")
@@ -1516,13 +1536,13 @@ def build_html_report(df, report, cfg_dict, file_name, file_bytes,
         ]
         image_section = (
             "<h2>Image Quality Signals</h2><table><tr><th>Metric</th><th>Value</th></tr>"
-            + "".join(f"<tr><td>{name}</td><td>{value}</td></tr>" for name, value in image_rows)
+            + "".join(f"<tr><td>{esc(name)}</td><td>{esc(value)}</td></tr>" for name, value in image_rows)
             + "</table>"
         )
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
-<title>Dataset Safety Report — {file_name}</title>
+<title>Dataset Safety Report — {esc(file_name)}</title>
 <style>
 body {{ font-family: 'Segoe UI', system-ui, sans-serif; margin:0; padding:0; background:#0f1117; color:#e2e8f0; }}
 .container {{ max-width: 1100px; margin:0 auto; padding: 40px 24px; }}
@@ -1548,10 +1568,10 @@ footer {{ margin-top: 48px; color: #475569; font-size: 0.78rem; border-top: 1px 
 </style></head><body>
 <div class="container">
 <h1>Dataset Safety Report</h1>
-<div class="meta">File: <strong>{file_name}</strong> &nbsp;·&nbsp; {df.shape[0]:,} rows × {df.shape[1]:,} columns &nbsp;·&nbsp; Mode: {cfg_dict.get('mode','—')} &nbsp;·&nbsp; Preset: {cfg_dict.get('preset','—')}</div>
+<div class="meta">File: <strong>{esc(file_name)}</strong> &nbsp;·&nbsp; {df.shape[0]:,} rows × {df.shape[1]:,} columns &nbsp;·&nbsp; Mode: {esc(cfg_dict.get('mode','—'))} &nbsp;·&nbsp; Preset: {esc(cfg_dict.get('preset','—'))}</div>
 <div class="score-ring">
-  <div><div class="score-num">{score}</div><div style="color:{score_color};font-weight:700;font-size:0.9rem;">Grade {grade}</div></div>
-  <div><div class="score-label">Overall verdict</div><div class="verdict">{verdict}</div></div>
+  <div><div class="score-num">{esc(score)}</div><div style="color:{score_color};font-weight:700;font-size:0.9rem;">Grade {esc(grade)}</div></div>
+  <div><div class="score-label">Overall verdict</div><div class="verdict">{esc(verdict)}</div></div>
 </div>
 <div class="kpis">
 <div class="kpi"><div class="kpi-t">Rows</div><div class="kpi-v">{df.shape[0]:,}</div></div>

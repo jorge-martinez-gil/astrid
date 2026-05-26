@@ -206,6 +206,24 @@ This means that only the **relative proportions** matter. Setting Quality = 70, 
 
 ### Programmatic usage
 
+### Command-line audits and history
+
+After installing the package, tabular audits can also run headlessly:
+
+```bash
+astrid audit data.csv --label target --split split --policy "Balanced (default)" --save-history
+```
+
+Use `--json`, `--markdown`, or `--html` to export reports, and `--history-dir` to save audit records outside the default local history folder:
+
+```bash
+astrid audit data.csv --json report.json --history-dir audit_runs_ci --quiet
+```
+
+Saved CLI audits appear in the same Audit History workflow as Streamlit-created runs.
+
+### Python API
+
 You can also pass custom weights directly when calling `compute_health_score` from `utils.py`:
 
 ```python

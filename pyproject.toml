@@ -5,6 +5,25 @@ description = "Advanced Software Tools for Reliable Industrial Datasets"
 requires-python = ">=3.9"
 readme = "README.md"
 license = { file = "LICENSE" }
+dependencies = [
+    "streamlit>=1.35",
+    "pandas>=2.0",
+    "numpy>=1.23",
+    "pyarrow>=12.0",
+    "pillow>=9.0",
+    "imagehash>=4.3",
+    "scikit-learn>=1.2",
+    "scipy>=1.10",
+    "matplotlib",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
 
 [project.scripts]
 astrid = "astrid_cli:cli_main"
