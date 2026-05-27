@@ -545,14 +545,32 @@ with st.sidebar:
         "fairness":    st.session_state.get("weight_fairness",    DEFAULT_WEIGHTS["fairness"]),
     }
 
+    # Persist the last completed analysis across Streamlit reruns triggered by
+    # downloads or tab interactions, but reset when file/config inputs change.
+    _cfg_key = json.dumps({
+        "label_col": label_col, "split_col": split_col, "time_col": time_col,
+        "id_cols": sorted(id_cols), "group_cols": sorted(group_cols),
+        "annotator_cols": sorted(annotator_cols),
+        "random_state": int(random_state), "mode": mode,
+        "preset": preset_name,
+        "drift_ks_threshold": th.drift_ks_threshold,
+        "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
+    }, sort_keys=True)
+    _run_key = json.dumps({"df_hash": _df_hash, "cfg_key": _cfg_key}, sort_keys=True)
+
     st.divider()
     run = st.button("🔬 Run analysis", type="primary", use_container_width=True)
+
+if run:
+    st.session_state["tabular_last_run_key"] = _run_key
+
+analysis_ready = st.session_state.get("tabular_last_run_key") == _run_key
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Preview (before run)
 # ──────────────────────────────────────────────────────────────────────────────
 
-if not run:
+if not analysis_ready:
     c1, c2, c3, c4 = st.columns(4, gap="large")
     with c1: kpi("Rows",     f"{df.shape[0]:,}", f"Format: {detected}")
     with c2: kpi("Columns",  f"{df.shape[1]:,}", f"Numeric: {len(numeric_cols(df))} · Cat: {len(categorical_cols(df))}")
@@ -578,18 +596,6 @@ cfg = AssessConfig(
 )
 
 with st.spinner("Running checks…"):
-    # Build a stable cache key from the scan-relevant config (weights are NOT
-    # included — they only affect post-hoc scoring, so the heavy assess_all
-    # output can be reused when only weights change).
-    _cfg_key = json.dumps({
-        "label_col": label_col, "split_col": split_col, "time_col": time_col,
-        "id_cols": sorted(id_cols), "group_cols": sorted(group_cols),
-        "annotator_cols": sorted(annotator_cols),
-        "random_state": int(random_state), "mode": mode,
-        "preset": preset_name,
-        "drift_ks_threshold": th.drift_ks_threshold,
-        "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
-    }, sort_keys=True)
     report = _cached_assess(_df_hash, df, _cfg_key, cfg, file_bytes)
 
 safe_report = to_json_safe(report)

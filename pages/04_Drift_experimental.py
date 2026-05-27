@@ -1246,10 +1246,23 @@ for ds_name in selected_datasets:
     params_map[ds_name] = p
     ds_configs.append(DatasetConfig(ds_name, p.drift_t))
 
+_run_key = json.dumps({
+    "datasets": list(selected_datasets),
+    "params": {name: asdict(params) for name, params in params_map.items()},
+    "seed": int(seed),
+    "smooth_window": int(smooth_window),
+    "query_bin": int(query_bin),
+}, sort_keys=True, default=str)
+
+if run:
+    st.session_state["drift_sim_last_run_key"] = _run_key
+
+simulation_ready = st.session_state.get("drift_sim_last_run_key") == _run_key
+
 
 # ── Preview before run ──
 
-if not run:
+if not simulation_ready:
     c1, c2, c3, c4 = st.columns(4, gap="large")
     with c1:
         kpi("Datasets", str(len(selected_datasets)),

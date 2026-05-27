@@ -2449,6 +2449,8 @@ if zip_up is None:
 
 zip_bytes = zip_up.getvalue()
 zip_file_name = getattr(zip_up, "name", None) or "images.zip"
+meta_bytes = meta_up.getvalue() if meta_up is not None else None
+_meta_hash = sha256_bytes(meta_bytes) if meta_bytes is not None else None
 
 
 # ─── Cached helpers (file parse + assess) ──────────────────────────────────
@@ -2474,8 +2476,9 @@ def _cached_assess_images(_zip_hash: str, cfg_key: str,
 
 _zip_hash = sha256_bytes(zip_bytes)
 meta_df_raw = load_metadata_file(meta_up)
-if meta_df_raw is not None and "auto_meta_guesses_exp" not in st.session_state:
+if meta_df_raw is not None and st.session_state.get("auto_meta_guesses_exp_hash") != _meta_hash:
     st.session_state["auto_meta_guesses_exp"] = guess_columns_meta(meta_df_raw)
+    st.session_state["auto_meta_guesses_exp_hash"] = _meta_hash
 if "use_auto_meta_exp" not in st.session_state:
     st.session_state["use_auto_meta_exp"] = True
 
@@ -2630,6 +2633,38 @@ cfg = AssessConfig(
     max_pairs_for_near_dups=int(max_pairs),
 )
 
+_img_cfg_key = json.dumps({
+    "mode": cfg.mode,
+    "thresholds": {k: float(getattr(cfg.thresholds, k)) if isinstance(getattr(cfg.thresholds, k), (int, float)) else None
+                    for k in cfg.thresholds.__dataclass_fields__},
+    "columns": {
+        "path_col": cfg.path_col,
+        "label_col": cfg.label_col,
+        "split_col": cfg.split_col,
+        "time_col": cfg.time_col,
+        "group_cols": sorted(cfg.group_cols or []),
+        "id_cols": sorted(cfg.id_cols or []),
+        "source_cols": sorted(cfg.source_cols or []),
+        "condition_cols": sorted(cfg.condition_cols or []),
+        "annotator_cols": sorted(cfg.annotator_cols or []),
+    },
+    "metadata": cfg.metadata,
+    "random_state": int(cfg.random_state),
+    "max_images": int(cfg.max_images),
+    "sample_for_perceptual_dups": int(cfg.sample_for_perceptual_dups),
+    "sample_for_exif": int(cfg.sample_for_exif),
+    "max_pairs_for_near_dups": int(cfg.max_pairs_for_near_dups),
+}, sort_keys=True, default=str)
+_run_key = json.dumps(
+    {"zip_hash": _zip_hash, "meta_hash": _meta_hash, "cfg_key": _img_cfg_key},
+    sort_keys=True,
+)
+
+if run:
+    st.session_state["images_last_run_key"] = _run_key
+
+analysis_ready = st.session_state.get("images_last_run_key") == _run_key
+
 with st.spinner("Reading ZIP, scanning images and annotations..."):
     img_df, annotation_records, ingest_warnings = _cached_read_zip(_zip_hash, zip_bytes, cfg)
 
@@ -2648,7 +2683,7 @@ if meta_df_raw is not None:
 # Preview if not run
 # =========================
 
-if not run:
+if not analysis_ready:
     c1, c2, c3, c4, c5 = st.columns(5, gap="large")
     with c1:
         kpi("Images", f"{len(img_df):,}", "Scanned from ZIP")
@@ -2686,15 +2721,6 @@ if not run:
 # =========================
 
 with st.spinner("Running comprehensive trustworthiness checks..."):
-    _img_cfg_key = json.dumps({
-        "mode": cfg.mode,
-        "thresholds": {k: float(getattr(cfg.thresholds, k)) if isinstance(getattr(cfg.thresholds, k), (int, float)) else None
-                        for k in cfg.thresholds.__dataclass_fields__},
-        "random_state": int(cfg.random_state),
-        "max_images": int(cfg.max_images),
-        "sample_for_perceptual_dups": int(cfg.sample_for_perceptual_dups),
-        "sample_for_exif": int(cfg.sample_for_exif),
-    }, sort_keys=True, default=str)
     report = _cached_assess_images(_zip_hash, _img_cfg_key, img_df,
                                     meta_df_joined, annotation_records, cfg, zip_bytes)
 

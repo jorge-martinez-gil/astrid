@@ -74,11 +74,25 @@ if base_up is None or cand_up is None:
 
 
 try:
-    base_df, base_kind = _read_tabular(base_up.getvalue(), base_up.name)
-    cand_df, cand_kind = _read_tabular(cand_up.getvalue(), cand_up.name)
+    base_bytes = base_up.getvalue()
+    cand_bytes = cand_up.getvalue()
+    base_df, base_kind = _read_tabular(base_bytes, base_up.name)
+    cand_df, cand_kind = _read_tabular(cand_bytes, cand_up.name)
 except Exception as e:
     st.error(f"Failed to read one of the files: {e}")
     st.stop()
+
+_run_key = json.dumps({
+    "base_hash": sha256_bytes(base_bytes),
+    "candidate_hash": sha256_bytes(cand_bytes),
+    "ks_threshold": float(ks_threshold),
+    "max_cols": int(max_cols),
+}, sort_keys=True)
+
+if run:
+    st.session_state["cross_dataset_drift_last_run_key"] = _run_key
+
+comparison_ready = st.session_state.get("cross_dataset_drift_last_run_key") == _run_key
 
 
 # ─── Pre-run preview ──────────────────────────────────────────────────────────
@@ -89,7 +103,7 @@ with c3: kpi("Candidate rows", f"{cand_df.shape[0]:,}", cand_up.name)
 with c4: kpi("Candidate cols", f"{cand_df.shape[1]:,}", cand_kind)
 
 
-if not run:
+if not comparison_ready:
     st.markdown("<br>", unsafe_allow_html=True)
     cprev1, cprev2 = st.columns(2, gap="large")
     with cprev1:
