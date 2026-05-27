@@ -427,22 +427,6 @@ ASTRID is released under the [MIT License](LICENSE).
 
 ---
 
-## Citation
-
-If you use ASTRID in academic work, please cite:
-
-```bibtex
-@software{martinez_gil_astrid_2025,
-  author    = {Jorge Martinez-Gil},
-  title     = {{ASTRID}: Advanced Software Tools for Reliable Industrial Datasets},
-  year      = {2025},
-  url       = {https://github.com/jorge-martinez-gil/astrid},
-  note      = {Open-source dataset reliability assessment platform}
-}
-```
-
----
-
 ## Acknowledgements
 
 The **Advanced Software Tools for Reliable Industrial Datasets (ASTRID)** action has received funding from the EU, via **oc1-2025-TIS-01** issued and implemented by the **ENFIELD project**, under the grant agreement No **101120657**.
