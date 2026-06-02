@@ -48,6 +48,26 @@ def test_compute_health_score_normalizes_custom_weights():
     assert math.isclose(sum(components.values()), 100.0)
 
 
+def test_compute_health_score_gives_clean_reports_full_credit():
+    report = {
+        "quality": {
+            "missingness": {"overall_missing_rate": 0.02},
+            "duplicates": {"exact_duplicate_row_rate": 0.005},
+            "split_leakage": {"row_hash_cross_split_rate": 0.0},
+        },
+        "security": {"confidentiality_pii_heuristics": {"columns_with_hits": {}}},
+        "reliability": {"numeric_drift_ks_first_last": {"top_10_ks": {"sensor": 0.20}}},
+        "robustness": {"row_anomaly_score_mad": {"p99": 8.0}},
+        "fairness": {"note": "Select group columns to compute fairness checks."},
+    }
+
+    score, grade, components = compute_health_score(report, drift_threshold=0.30)
+
+    assert score == 100
+    assert grade == "A"
+    assert math.isclose(sum(components.values()), 100.0)
+
+
 def test_compute_health_score_merges_partial_custom_weights_before_normalizing():
     report = {
         "quality": {
@@ -283,6 +303,7 @@ def test_iso_25012_evidence_maps_results_to_characteristics():
 
 if __name__ == "__main__":
     test_compute_health_score_normalizes_custom_weights()
+    test_compute_health_score_gives_clean_reports_full_credit()
     test_compute_health_score_merges_partial_custom_weights_before_normalizing()
     test_compute_health_score_penalizes_key_findings()
     test_to_json_safe_converts_common_numpy_and_pandas_values()

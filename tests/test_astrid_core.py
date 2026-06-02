@@ -61,5 +61,34 @@ def test_headless_tabular_analyzer_flags_pii_and_split_leakage():
     assert any("leakage" in rec.lower() for rec in result["recommendations"])
 
 
+def test_headless_tabular_analyzer_scores_clean_dataset_at_100():
+    df = pd.DataFrame(
+        {
+            "sample_id": [f"sample_{i:03d}" for i in range(100)],
+            "sensor_a": list(range(100)),
+            "sensor_b": [100 - i for i in range(100)],
+            "status": ["normal"] * 100,
+        }
+    )
+
+    result = analyze_tabular_dataframe(
+        df,
+        dataset_bytes=dataframe_to_bytes(df),
+        dataset_name="clean.csv",
+        use_auto_columns=False,
+    )
+
+    assert result["score"] == 100
+    assert result["grade"] == "A"
+    assert result["score_components"] == {
+        "quality": 35.0,
+        "security": 25.0,
+        "reliability": 20.0,
+        "robustness": 10.0,
+        "fairness": 10.0,
+    }
+
+
 if __name__ == "__main__":
     test_headless_tabular_analyzer_flags_pii_and_split_leakage()
+    test_headless_tabular_analyzer_scores_clean_dataset_at_100()

@@ -609,14 +609,26 @@ def compute_health_score(
 
     components: Dict[str, float] = {}
 
+    def score_above_warning(value: Any, warn: float, severe: float) -> float:
+        """Full credit until the warning threshold, then linear penalty."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if numeric <= warn:
+            return 1.0
+        if severe <= warn:
+            return 0.0
+        return max(0.0, 1.0 - (numeric - warn) / (severe - warn))
+
     # Quality
     q = report.get("quality", {})
     miss = float(q.get("missingness", {}).get("overall_missing_rate", 0))
     dup  = float(q.get("duplicates", {}).get("exact_duplicate_row_rate", 0))
     leak = q.get("split_leakage", {}).get("row_hash_cross_split_rate", None)
     q_scores = [
-        max(0.0, 1 - miss / 0.20),   # 0% miss → 1.0; 20%+ → 0.0
-        max(0.0, 1 - dup / 0.10),    # 0% dup → 1.0; 10%+ → 0.0
+        score_above_warning(miss, 0.05, 0.20),
+        score_above_warning(dup, 0.01, 0.10),
     ]
     if leak is not None:
         q_scores.append(0.0 if float(leak) > 0 else 1.0)
@@ -655,35 +667,31 @@ def compute_health_score(
     drift = r.get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
     if drift:
         max_ks = max((float(v) for v in drift.values() if v is not None), default=0.0)
-        r_score = max(0.0, 1.0 - max_ks / max(drift_threshold, 0.01))
+        warn_ks = max(drift_threshold, 0.01)
+        r_score = score_above_warning(max_ks, warn_ks, min(1.0, warn_ks * 2.0))
     else:
-        r_score = 0.75  # unknown → neutral
+        r_score = 1.0
     components["reliability"] = r_score * norm_w["reliability"]
 
     # Robustness
     rb = report.get("robustness", {})
     p99 = rb.get("row_anomaly_score_mad", {}).get("p99", None)
-    if p99 is not None:
-        rb_score = max(0.0, 1.0 - float(p99) / 20.0)
-    else:
-        rb_score = 0.75
+    rb_score = score_above_warning(p99, 10.0, 20.0) if p99 is not None else 1.0
     components["robustness"] = rb_score * norm_w["robustness"]
 
     # Fairness
     f = report.get("fairness", {})
-    if "note" in f:
-        components["fairness"] = 0.75 * norm_w["fairness"]
-    else:
-        disp_scores = []
+    disp_scores = []
+    if "note" not in f:
         for gcol, stats in f.get("group_checks", {}).items():
             disp = stats.get("positive_rate_disparity", None)
             if disp is not None:
-                disp_scores.append(max(0.0, 1.0 - float(disp) / 0.5))
-        components["fairness"] = (
-            (sum(disp_scores) / len(disp_scores)) * norm_w["fairness"]
-            if disp_scores
-            else 0.75 * norm_w["fairness"]
-        )
+                disp_scores.append(score_above_warning(disp, 0.20, 0.50))
+    components["fairness"] = (
+        (sum(disp_scores) / len(disp_scores)) * norm_w["fairness"]
+        if disp_scores
+        else norm_w["fairness"]
+    )
 
     total = round(min(100, max(0, sum(components.values()))))
 
