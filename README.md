@@ -73,23 +73,30 @@ Within a broader MLOps workflow, ASTRID fits naturally at the data-validation ga
 
 ```
 astrid/
-├── app.py                       # Streamlit home / landing page
-├── utils.py                     # Shared utilities, scoring engine, CSS design system
+├── app.py                       # Streamlit home page
+├── astrid_cli.py                # Headless command-line interface
+├── astrid_core.py               # Reusable tabular analysis API
+├── astrid_image_io.py           # Resource-safe image archive ingestion
+├── audit_history.py             # Audit persistence and policy gates
+├── utils.py                     # Shared scoring, reporting, and UI helpers
 ├── pages/
 │   ├── 01_Tabular.py            # Tabular dataset analyzer
 │   ├── 02_Time_Series.py        # Time-series dataset analyzer
 │   ├── 03_Images.py             # Image dataset analyzer
-│   └── 04_Drift_experimental.py # Experimental drift tracker
+│   ├── 04_Drift_experimental.py # Experimental drift tracker
+│   ├── 05_Audit_History.py      # Saved-run review and comparison
+│   └── 06_Cross_Dataset_Drift.py # Dataset drift comparison
+├── tests/                       # Automated tests
+├── experiments/                 # Reproducible research experiments
 ├── docs/                        # Jekyll documentation site
-├── requirements.txt
-└── logo.png
+└── pyproject.toml               # Package metadata and dependencies
 ```
 
 **`app.py`** is the Streamlit entry point and renders the landing page with navigation cards for each analyzer.
 
 **`utils.py`** is the shared library imported by every page. It contains the CSS design system, the `compute_health_score` scoring engine (with `DEFAULT_WEIGHTS`), helper functions for HTML report generation, PII pattern matching, statistical utilities, and common widget renderers.
 
-Each **page module** (`01_Tabular.py`, `02_Time_Series.py`, `03_Images.py`) is self-contained: it defines its own data-model dataclasses, check functions, verdict logic, recommendation builder, and Streamlit layout—while delegating scoring and styling to `utils.py`.
+The tabular page delegates analysis to `astrid_core.py`, allowing the Streamlit UI and CLI to use the same implementation. The time-series and image pages currently combine analyzer and UI logic; moving those analyzers into headless modules is part of the ongoing architecture work.
 
 ---
 
@@ -128,13 +135,10 @@ source .venv/bin/activate
 # On Windows:
 .venv\Scripts\activate
 
-# 3. Install core dependencies
-pip install -r requirements.txt
+# 3. Install ASTRID and its dependencies
+python -m pip install -e .
 
-# 4. Optional – install extras for richer image analysis
-pip install imagehash scikit-learn scipy
-
-# 5. Launch the application
+# 4. Launch the application
 streamlit run app.py
 ```
 
@@ -296,7 +300,7 @@ print(f"Score: {score}  Grade: {grade}")
 **Checks performed:**
 - Image readability (corrupt / unreadable file detection)
 - Resolution audit (low-resolution image rate)
-- Exact duplicate detection (MD5 hash) and perceptual near-duplicate detection (pHash, requires `imagehash`)
+- Exact duplicate detection (SHA-256 hash) and perceptual near-duplicate detection (pHash)
 - Cross-split hash leakage
 - Conflicting-label detection on duplicate images
 - Class balance (normalised entropy)
@@ -312,6 +316,8 @@ print(f"Score: {score}  Grade: {grade}")
 - PII-like pattern detection in file paths and names
 - Suspicious sample rate (statistical outlier images)
 - Source-concentration HHI (dataset diversity)
+
+Image archives are screened before decompression. ASTRID rejects archives that exceed global compressed-size, file-count, or expanded-size limits, skips suspiciously compressed or oversized members, and refuses to decode images above the configured pixel budget.
 
 **Output:**
 - Property score bars for six dimensions (Quality, Reliability, Robustness, Fairness, Transparency, Security)
@@ -410,7 +416,9 @@ ASTRID does not provide legal compliance certification. The outputs are technica
 
 ## Contributing
 
-Contributions are welcome! To contribute:
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and required checks.
+
+To contribute:
 
 1. Fork the repository on [GitHub](https://github.com/jorge-martinez-gil/astrid).
 2. Create a feature branch: `git checkout -b feature/my-improvement`.
@@ -418,6 +426,8 @@ Contributions are welcome! To contribute:
 4. Open a pull request describing your changes.
 
 For bug reports and feature requests, please open an issue on the [issue tracker](https://github.com/jorge-martinez-gil/astrid/issues).
+
+Please report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ---
 

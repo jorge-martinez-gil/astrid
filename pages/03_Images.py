@@ -80,6 +80,12 @@ except Exception:
     HAS_UTILS = False
     DEFAULT_WEIGHTS = {"quality": 35, "security": 25, "reliability": 20, "robustness": 10, "fairness": 10}
 from audit_history import build_audit_record, evaluate_policy, save_audit_record
+from astrid_image_io import (
+    ArchiveSafetyError,
+    ArchiveSafetyLimits,
+    open_image_with_pixel_limit,
+    screen_zip_members,
+)
 
 st.set_page_config(page_title="Image Dataset Trustworthiness Analyzer (Experimental)", page_icon="🔬", layout="wide")
 
@@ -697,10 +703,9 @@ def guess_columns_meta(df: pd.DataFrame) -> Dict[str, Any]:
 
 EXIF_COLUMNS = ["has_exif", "has_gps", "exif_make", "exif_model", "exif_datetime"]
 
-def safe_open_image(data: bytes) -> Tuple[Optional[Image.Image], Optional[str]]:
+def safe_open_image(data: bytes, max_pixels: int) -> Tuple[Optional[Image.Image], Optional[str]]:
     try:
-        img = Image.open(io.BytesIO(data))
-        img.load()
+        img = open_image_with_pixel_limit(data, max_pixels)
         return img, None
     except Exception as e:
         return None, str(e)
@@ -909,6 +914,7 @@ class AssessConfig:
     sample_for_perceptual_dups: int = 1500
     sample_for_exif: int = 2000
     max_pairs_for_near_dups: int = 200000
+    archive_safety: ArchiveSafetyLimits = field(default_factory=ArchiveSafetyLimits)
 
 
 # =========================
@@ -919,25 +925,29 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
     """Read images (and annotation files) from ZIP. Returns (img_df, annotation_records, warnings)."""
     warnings: List[str] = []
 
-    zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    names = [n for n in zf.namelist() if not n.endswith("/")]
+    zf, members, safety_warnings = screen_zip_members(zip_bytes, cfg.archive_safety)
+    warnings.extend(safety_warnings)
 
-    img_names: List[str] = []
-    ann_names: List[str] = []
-    for n in names:
-        ext = os.path.splitext(n)[1].lower()
+    img_members: List[zipfile.ZipInfo] = []
+    ann_members: List[zipfile.ZipInfo] = []
+    for info in members:
+        ext = os.path.splitext(info.filename)[1].lower()
         if ext in IMG_EXTS:
-            img_names.append(n)
+            img_members.append(info)
         elif ext in ANN_EXTS:
-            ann_names.append(n)
+            ann_members.append(info)
 
-    if not img_names:
-        return pd.DataFrame(), [], ["No supported images found in ZIP."]
+    if not img_members:
+        zf.close()
+        return pd.DataFrame(), [], warnings + ["No supported images found in ZIP."]
 
-    if len(img_names) > cfg.max_images:
-        warnings.append(f"Image count {len(img_names)} exceeds cap {cfg.max_images}. Scanning a sample.")
+    if len(img_members) > cfg.max_images:
+        warnings.append(f"Image count {len(img_members)} exceeds cap {cfg.max_images}. Scanning a sample.")
         rng = np.random.RandomState(cfg.random_state)
-        img_names = list(rng.choice(img_names, size=cfg.max_images, replace=False))
+        selected = rng.choice(len(img_members), size=cfg.max_images, replace=False)
+        img_members = [img_members[int(i)] for i in selected]
+
+    img_names = [info.filename for info in img_members]
 
     rows: List[Dict[str, Any]] = []
     rng = np.random.RandomState(cfg.random_state)
@@ -969,28 +979,37 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
         }
         if n in folder_labels:
             row["folder_label"] = folder_labels[n]
-        img, err = safe_open_image(data)
+        img, err = safe_open_image(data, cfg.archive_safety.max_image_pixels)
         if img is None:
             row["open_ok"] = False
             row["open_error"] = err
             row.update({c: None for c in EXIF_COLUMNS})
             row["phash"] = None
             return row
-        row["open_ok"] = True
-        row["open_error"] = None
-        row.update(image_features(img))
-        if n in sample_exif:
-            ex = exif_flags(img)
-            for c in EXIF_COLUMNS:
-                ex.setdefault(c, None)
-            row.update(ex)
-        else:
-            row.update({c: None for c in EXIF_COLUMNS})
-        if IMAGEHASH_OK and n in sample_phash:
-            row["phash"] = perceptual_hash(img)
-        else:
+        try:
+            row["open_ok"] = True
+            row["open_error"] = None
+            row.update(image_features(img))
+            if n in sample_exif:
+                ex = exif_flags(img)
+                for c in EXIF_COLUMNS:
+                    ex.setdefault(c, None)
+                row.update(ex)
+            else:
+                row.update({c: None for c in EXIF_COLUMNS})
+            if IMAGEHASH_OK and n in sample_phash:
+                row["phash"] = perceptual_hash(img)
+            else:
+                row["phash"] = None
+            return row
+        except Exception as exc:
+            row["open_ok"] = False
+            row["open_error"] = f"feature_extraction_failed: {exc}"
             row["phash"] = None
-        return row
+            row.update({c: row.get(c) for c in EXIF_COLUMNS})
+            return row
+        finally:
+            img.close()
 
     # Read bytes serially (zipfile not thread-safe), process in parallel.
     # Use bounded prefetch so memory stays in check on huge ZIPs.
@@ -1002,12 +1021,13 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
         futures = {}
         # Stream in batches so we don't hold all image bytes in RAM at once.
         batch_size = max(16, max_workers * 4)
-        for batch_start in range(0, len(img_names), batch_size):
-            batch = img_names[batch_start:batch_start + batch_size]
+        for batch_start in range(0, len(img_members), batch_size):
+            batch = img_members[batch_start:batch_start + batch_size]
             batch_futures = []
-            for offset, n in enumerate(batch):
+            for offset, info in enumerate(batch):
+                n = info.filename
                 try:
-                    data = zf.read(n)
+                    data = zf.read(info)
                 except Exception as exc:
                     rows_by_idx[batch_start + offset] = {
                         "path_in_zip": n,
@@ -1034,11 +1054,12 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
 
     # Parse annotation files
     annotation_records: List[Dict[str, Any]] = []
-    max_ann = min(len(ann_names), 5000)
-    for n in ann_names[:max_ann]:
+    max_ann = min(len(ann_members), 5000)
+    for info in ann_members[:max_ann]:
+        n = info.filename
         ext = os.path.splitext(n)[1].lower()
         try:
-            data = zf.read(n)
+            data = zf.read(info)
         except Exception:
             annotation_records.append({"path": n, "format": ext, "valid": False, "error": "read_failed"})
             continue
@@ -1056,9 +1077,10 @@ def read_zip_images(zip_bytes: bytes, cfg: AssessConfig) -> Tuple[pd.DataFrame, 
         rec["sha256"] = sha256_bytes(data)
         annotation_records.append(rec)
 
-    if len(ann_names) > max_ann:
-        warnings.append(f"Only first {max_ann} annotation files parsed out of {len(ann_names)}.")
+    if len(ann_members) > max_ann:
+        warnings.append(f"Only first {max_ann} annotation files parsed out of {len(ann_members)}.")
 
+    zf.close()
     return img_df, annotation_records, warnings
 
 
@@ -2665,8 +2687,12 @@ if run:
 
 analysis_ready = st.session_state.get("images_last_run_key") == _run_key
 
-with st.spinner("Reading ZIP, scanning images and annotations..."):
-    img_df, annotation_records, ingest_warnings = _cached_read_zip(_zip_hash, zip_bytes, cfg)
+try:
+    with st.spinner("Reading ZIP, scanning images and annotations..."):
+        img_df, annotation_records, ingest_warnings = _cached_read_zip(_zip_hash, zip_bytes, cfg)
+except ArchiveSafetyError as exc:
+    st.error(f"Image archive rejected: {exc}")
+    st.stop()
 
 if img_df.empty:
     st.error("No images scanned.")

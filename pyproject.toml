@@ -4,7 +4,8 @@ version = "1.0.0"
 description = "Advanced Software Tools for Reliable Industrial Datasets"
 requires-python = ">=3.9"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "streamlit>=1.35",
     "pandas>=2.0",
@@ -21,12 +22,26 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest",
     "ruff",
 ]
 
 [project.scripts]
 astrid = "astrid_cli:cli_main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "astrid_cli",
+    "astrid_core",
+    "astrid_image_io",
+    "audit_history",
+    "utils",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -293,7 +293,7 @@ def to_datetime_if_possible(s: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(s.dtype):
         return s
     try:
-        return pd.to_datetime(s, errors="coerce")
+        return pd.to_datetime(s, errors="coerce", format="mixed")
     except Exception:
         return s
 
