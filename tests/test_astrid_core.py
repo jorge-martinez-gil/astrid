@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from astrid_core import (
@@ -87,6 +88,31 @@ def test_headless_tabular_analyzer_scores_clean_dataset_at_100():
         "robustness": 10.0,
         "fairness": 10.0,
     }
+
+
+def test_headless_tabular_analyzer_reports_suspected_label_noise():
+    rng = np.random.RandomState(3)
+    left = rng.normal(-3.0, 0.4, size=(70, 2))
+    right = rng.normal(3.0, 0.4, size=(70, 2))
+    df = pd.DataFrame(
+        np.vstack([left, right]),
+        columns=["sensor_a", "sensor_b"],
+    )
+    df["sample_id"] = [f"sample_{i:03d}" for i in range(len(df))]
+    df["target"] = [0] * 70 + [1] * 70
+    df.loc[[5, 19, 91, 118], "target"] = [1, 1, 0, 0]
+    cfg = TabularAssessConfig(
+        label_col="target",
+        id_cols=["sample_id"],
+        thresholds=TABULAR_PRESETS["Balanced (recommended)"],
+    )
+
+    result = analyze_tabular_dataframe(df, config=cfg, use_auto_columns=False)
+    label_noise = result["report"]["quality"]["label_noise"]
+
+    assert label_noise["status"] == "ok"
+    assert label_noise["suspected_label_noise_count"] >= 3
+    assert label_noise["top_suspected_samples"]
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ title: Tabular Dataset Analyzer
 
 Structured dataset analyzer with checks for quality, reliability, robustness, fairness, and security.
 
+Classification audits include a conservative out-of-fold label-noise estimate and ranked row-level candidates for human review.
+
 ---
 
 ## Method behavior (granular)

@@ -264,6 +264,7 @@ print(f"Score: {score}  Grade: {grade}")
 - PII heuristic scan across text columns
 - Numeric distribution drift (KS statistic, first vs. last temporal slice)
 - MAD-based row anomaly scoring
+- Suspected label-noise rate with ranked row-level review candidates
 - Group fairness: positive-rate disparity across user-selected group columns
 - Inter-annotator agreement (Cohen's κ) when annotator columns are supplied
 - Rare-category detection in categorical columns
@@ -286,6 +287,7 @@ print(f"Score: {score}  Grade: {grade}")
 - Timestamp parsability and duplicate timestamp rate
 - Cadence irregularity (coefficient of variation of inter-sample intervals)
 - Entity-level statistics when entity columns are selected
+- Temporal label-noise assessment using sensor, context, and timestamp-derived features
 - Time-slice mode (day / week / month / quarter) for drift computation
 
 **Output:**
@@ -303,6 +305,7 @@ print(f"Score: {score}  Grade: {grade}")
 - Exact duplicate detection (SHA-256 hash) and perceptual near-duplicate detection (pHash)
 - Cross-split hash leakage
 - Conflicting-label detection on duplicate images
+- Suspected label-noise rate with ranked image review candidates
 - Class balance (normalised entropy)
 - Annotator agreement (Cohen's κ) on annotation files
 - KS-based feature drift between temporal slices

@@ -81,6 +81,14 @@ THRESHOLD_DOCS = {
         "lenient": 0.02,
         "interpretation": "Lower values make the scan more sensitive.",
     },
+    "label_noise_rate_warn": {
+        "label": "Suspected label-noise warning",
+        "description": "Warn when the conservative out-of-fold label-noise estimate exceeds this rate.",
+        "balanced": 0.05,
+        "strict": 0.02,
+        "lenient": 0.10,
+        "interpretation": "Lower values trigger review with fewer suspected mislabeled samples.",
+    },
 }
 
 METRIC_DOCS = {
@@ -155,6 +163,15 @@ METRIC_DOCS = {
         "how_computed": "Row-wise unique non-null labels <= 1.",
         "interpretation": "Higher is better.",
         "related_thresholds": [],
+    },
+    "label_noise.suspected_label_noise_rate": {
+        "label": "Suspected label-noise rate",
+        "dimension": "Quality",
+        "what_it_is": "Share of evaluated labels for which an out-of-fold model confidently prefers another class.",
+        "why_it_matters": "Likely annotation errors can cap model quality and distort evaluation.",
+        "how_computed": "Cross-validated logistic regression over usable features; only confident model-label disagreements are flagged.",
+        "interpretation": "Lower is better. Candidates require human review and are not confirmed errors.",
+        "related_thresholds": ["label_noise_rate_warn"],
     },
     "split_leakage.row_hash_cross_split_rate": {
         "label": "Cross-split leakage rate",
@@ -783,6 +800,7 @@ with tab_q:
         "duplicates.exact_duplicate_row_rate", "duplicates.duplicate_id_rate",
         "outliers_iqr.top_10_outlier_rate", "label_stats.label_missing_rate",
         "label_stats.label_cardinality", "label_agreement.exact_agreement_rate",
+        "label_noise.suspected_label_noise_rate",
         "split_leakage.row_hash_cross_split_rate"
     ])
 
@@ -834,6 +852,28 @@ with tab_q:
         if ls.get("top_classes_share"):
             cls_df = pd.DataFrame(list(ls["top_classes_share"].items()), columns=["class", "share"])
             st.bar_chart(cls_df.set_index("class")["share"])
+
+    if "label_noise" in q:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("**Label-noise assessment**")
+        label_noise = q["label_noise"]
+        if label_noise.get("status") != "ok":
+            st.info(label_noise.get("note", "Label-noise assessment was skipped."))
+        else:
+            ln1, ln2, ln3 = st.columns(3)
+            with ln1:
+                st.metric(
+                    "Suspected rate",
+                    f"{label_noise['suspected_label_noise_rate']:.2%}",
+                )
+            with ln2:
+                st.metric("Candidates", str(label_noise["suspected_label_noise_count"]))
+            with ln3:
+                st.metric("Rows evaluated", f"{label_noise['evaluated_rows']:,}")
+            candidates = label_noise.get("top_suspected_samples", [])
+            if candidates:
+                st.caption("Ranked review candidates; these are not confirmed annotation errors.")
+                st.dataframe(pd.DataFrame(candidates), use_container_width=True, hide_index=True)
 
     # Split leakage
     if "split_leakage" in q:

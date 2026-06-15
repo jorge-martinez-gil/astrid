@@ -17,6 +17,7 @@ from utils import (
     build_iso_25012_evidence, build_iso_25012_evidence_markdown,
     render_iso_25012_evidence_section,
 )
+from astrid_label_noise import assess_label_noise
 from audit_history import build_audit_record, evaluate_policy, save_audit_record
 
 from dataclasses import dataclass, field
@@ -42,14 +43,15 @@ st.markdown(SHARED_CSS, unsafe_allow_html=True)
 class Thresholds:
     drift_ks_threshold: float
     pii_hit_rate_threshold: float
+    label_noise_rate_warn: float
     time_parse_ok_min: float
     dup_timestamp_rate_max: float
     cadence_irregularity_max: float
 
 PRESETS: Dict[str, Thresholds] = {
-    "Balanced (recommended)": Thresholds(0.30, 0.01, 0.98, 0.01, 2.0),
-    "Strict":                 Thresholds(0.20, 0.005, 0.995, 0.005, 1.5),
-    "Lenient":                Thresholds(0.40, 0.02, 0.95, 0.02, 3.0),
+    "Balanced (recommended)": Thresholds(0.30, 0.01, 0.05, 0.98, 0.01, 2.0),
+    "Strict":                 Thresholds(0.20, 0.005, 0.02, 0.995, 0.005, 1.5),
+    "Lenient":                Thresholds(0.40, 0.02, 0.10, 0.95, 0.02, 3.0),
 }
 
 @dataclass
@@ -93,6 +95,14 @@ THRESHOLD_DOCS = {
         "strict": 0.005,
         "lenient": 0.02,
         "interpretation": "Lower values make the scan more sensitive.",
+    },
+    "label_noise_rate_warn": {
+        "label": "Suspected label-noise warning",
+        "description": "Warn when the conservative out-of-fold label-noise estimate exceeds this rate.",
+        "balanced": 0.05,
+        "strict": 0.02,
+        "lenient": 0.10,
+        "interpretation": "Lower values trigger review with fewer suspected mislabeled samples.",
     },
 }
 
@@ -205,6 +215,15 @@ METRIC_DOCS = {
         "how_computed": "Row-wise unique non-null labels <= 1.",
         "interpretation": "Higher is better.",
         "related_thresholds": [],
+    },
+    "label_noise.suspected_label_noise_rate": {
+        "label": "Suspected label-noise rate",
+        "dimension": "Quality",
+        "what_it_is": "Share of evaluated time-series labels for which an out-of-fold model confidently prefers another class.",
+        "why_it_matters": "Incorrect point or window labels can hide temporal failure modes and cap model quality.",
+        "how_computed": "Cross-validated logistic regression over sensor, context, and numeric timestamp features.",
+        "interpretation": "Lower is better. Candidates require human review and are not confirmed errors.",
+        "related_thresholds": ["label_noise_rate_warn"],
     },
     "split_leakage.row_hash_cross_split_rate": {
         "label": "Cross-split leakage rate",
@@ -593,7 +612,56 @@ def assess_quality(df, cfg):
         y = df[cfg.label_col]
         vc = y.value_counts(dropna=True)
         out["label_stats"] = {"label_missing_rate": float(y.isna().mean()), "label_cardinality": int(y.nunique(dropna=True)),
-                               "top_classes_share": (vc / vc.sum()).head(10).to_dict() if 2 <= len(vc) <= cfg.max_categories_for_stats else None}
+                              "top_classes_share": (vc / vc.sum()).head(10).to_dict() if 2 <= len(vc) <= cfg.max_categories_for_stats else None}
+        unique = int(y.nunique(dropna=True))
+        looks_like_regression = (
+            pd.api.types.is_numeric_dtype(y.dtype)
+            and unique > 20
+            and unique > 0.05 * max(1, int(y.notna().sum()))
+        )
+        if 2 <= unique <= 50 and not looks_like_regression:
+            excluded = {
+                cfg.label_col,
+                cfg.split_col,
+                cfg.time_col,
+                *cfg.annotator_label_cols,
+                *cfg.id_cols,
+            }
+            feature_cols = [c for c in df.columns if c not in excluded]
+            noise_features = df[feature_cols].copy()
+            if cfg.time_col and cfg.time_col in df.columns:
+                parsed_time = pd.to_datetime(df[cfg.time_col], errors="coerce", utc=True)
+                time_numeric = pd.Series(
+                    parsed_time.astype("int64"), index=df.index, dtype="float64"
+                )
+                noise_features["__timestamp_seconds"] = (
+                    time_numeric.where(parsed_time.notna()) / 1e9
+                )
+            valid_ids = [c for c in cfg.id_cols if c in df.columns]
+            sample_ids = (
+                df[valid_ids].astype("string").fillna("<missing>").agg(" | ".join, axis=1)
+                if valid_ids
+                else pd.Series(df.index, index=df.index)
+            )
+            out["label_noise"] = assess_label_noise(
+                noise_features,
+                y,
+                sample_ids=sample_ids,
+                random_state=cfg.random_state,
+                warning_threshold=cfg.thresholds.label_noise_rate_warn,
+                max_samples=10000 if cfg.mode == "Full Scan" else 5000,
+                max_categorical_cardinality=cfg.max_categories_for_stats * 2,
+            )
+        else:
+            out["label_noise"] = {
+                "status": "skipped",
+                "note": "Label-noise assessment currently supports classification labels only.",
+                "labeled_rows": int(y.notna().sum()),
+                "evaluated_rows": 0,
+                "suspected_label_noise_rate": None,
+                "suspected_label_noise_count": 0,
+                "top_suspected_samples": [],
+            }
 
     if cfg.split_col and cfg.split_col in df.columns:
         split = df[cfg.split_col].astype("string")
@@ -751,6 +819,9 @@ def verdict_panel(report, cfg):
         reasons.append("Potential drift — at least one KS statistic exceeds the threshold.")
     if pii: reasons.append("PII-like patterns detected — review confidentiality and legal basis.")
     if leak is not None and float(leak) > 0: reasons.append("Potential split leakage.")
+    label_noise_rate = q.get("label_noise", {}).get("suspected_label_noise_rate")
+    if label_noise_rate is not None and float(label_noise_rate) > th.label_noise_rate_warn:
+        reasons.append("Suspected label-noise rate exceeds the configured threshold.")
     if reasons: return "Needs review", "warn", reasons
     return "Looks OK (evidence-based)", "ok", ["No major red flags under current checks."]
 
@@ -780,6 +851,9 @@ def build_recommendations(report, cfg):
         recs.append("Drift above threshold — compare first vs last slice and consider retraining or recalibration.")
     pii = s.get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
     if pii: recs.append("PII-like patterns found — mask or remove flagged columns.")
+    label_noise_rate = q.get("label_noise", {}).get("suspected_label_noise_rate")
+    if label_noise_rate is not None and float(label_noise_rate) > th.label_noise_rate_warn:
+        recs.append("Review the ranked label-noise candidates and correct or relabel confirmed issues.")
     if not recs: recs.append("No major red flags. Keep the report and rerun after dataset updates.")
     return recs
 
@@ -850,6 +924,7 @@ with st.sidebar:
     th = PRESETS[preset_name]
     with st.expander("Show thresholds"):
         st.write({"drift_ks": th.drift_ks_threshold, "pii_hit_rate": th.pii_hit_rate_threshold,
+                  "label_noise_rate_warn": th.label_noise_rate_warn,
                   "time_parse_ok_min": th.time_parse_ok_min, "dup_ts_max": th.dup_timestamp_rate_max,
                   "cadence_irr_max": th.cadence_irregularity_max})
 
@@ -919,6 +994,7 @@ with st.sidebar:
         "mode": mode, "preset": preset_name,
         "drift_ks_threshold": th.drift_ks_threshold,
         "pii_hit_rate_threshold": th.pii_hit_rate_threshold,
+        "label_noise_rate_warn": th.label_noise_rate_warn,
     }, sort_keys=True)
     _run_key = json.dumps({"df_hash": _df_hash, "cfg_key": _cfg_key}, sort_keys=True)
 
@@ -960,6 +1036,7 @@ dim_status = get_dimension_status(report, th.drift_ks_threshold)
 
 cfg_dict = {"mode": mode, "preset": preset_name, "drift_ks_threshold": th.drift_ks_threshold,
             "pii_hit_rate_threshold": th.pii_hit_rate_threshold, "label_col": label_col,
+            "label_noise_rate_warn": th.label_noise_rate_warn,
             "split_col": split_col, "time_col": time_col, "id_cols": id_cols,
             "group_cols": group_cols, "random_state": int(random_state), "column_roles": {}}
 
@@ -1097,7 +1174,8 @@ with tab_q:
     render_metric_help_block([
         "missingness.overall_missing_rate", "duplicates.exact_duplicate_row_rate",
         "outliers_iqr.top_10_outlier_rate", "label_stats.label_missing_rate",
-        "label_stats.label_cardinality", "split_leakage.row_hash_cross_split_rate",
+        "label_stats.label_cardinality", "label_noise.suspected_label_noise_rate",
+        "split_leakage.row_hash_cross_split_rate",
         "time_axis_health.time_parse.parse_ok_rate", "time_axis_health.duplicate_timestamps.duplicate_rate",
         "time_axis_health.cadence_global.irregularity_ratio", "time_axis_health.gaps_global.large_gap_rate"
     ])
@@ -1115,6 +1193,28 @@ with tab_q:
                 html_bars2 = "".join(progress_bar_html(col, v, max_val=1.0, reverse=True) for col, v in sorted(out_top.items(), key=lambda x: x[1], reverse=True))
                 st.markdown(html_bars2, unsafe_allow_html=True)
             else: st.info("No numeric columns to evaluate.")
+
+    if "label_noise" in q:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("**Label-noise assessment**")
+        label_noise = q["label_noise"]
+        if label_noise.get("status") != "ok":
+            st.info(label_noise.get("note", "Label-noise assessment was skipped."))
+        else:
+            ln1, ln2, ln3 = st.columns(3)
+            with ln1:
+                st.metric(
+                    "Suspected rate",
+                    f"{label_noise['suspected_label_noise_rate']:.2%}",
+                )
+            with ln2:
+                st.metric("Candidates", str(label_noise["suspected_label_noise_count"]))
+            with ln3:
+                st.metric("Rows evaluated", f"{label_noise['evaluated_rows']:,}")
+            candidates = label_noise.get("top_suspected_samples", [])
+            if candidates:
+                st.caption("Ranked review candidates; these are not confirmed annotation errors.")
+                st.dataframe(pd.DataFrame(candidates), use_container_width=True, hide_index=True)
 
     # Time axis health details
     th_data = q.get("time_axis_health", {})

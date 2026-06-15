@@ -6,6 +6,8 @@ title: Time Series Dataset Analyzer
 
 Temporal dataset analyzer focused on stability and drift.
 
+Classification audits assess suspected label noise from sensor, context, and timestamp-derived features and rank samples for review.
+
 ---
 
 ## Method behavior (granular)

@@ -6,6 +6,8 @@ title: Image Dataset Analyzer
 
 Image dataset analyzer with visual, structural, and privacy checks.
 
+When metadata or folder labels are available, the analyzer estimates suspected label noise from image statistics and ranks images for review.
+
 ---
 
 ## Method behavior (granular)

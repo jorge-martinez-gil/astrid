@@ -39,6 +39,7 @@ py-modules = [
     "astrid_cli",
     "astrid_core",
     "astrid_image_io",
+    "astrid_label_noise",
     "audit_history",
     "utils",
 ]

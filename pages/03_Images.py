@@ -79,13 +79,14 @@ try:
 except Exception:
     HAS_UTILS = False
     DEFAULT_WEIGHTS = {"quality": 35, "security": 25, "reliability": 20, "robustness": 10, "fairness": 10}
-from audit_history import build_audit_record, evaluate_policy, save_audit_record
 from astrid_image_io import (
     ArchiveSafetyError,
     ArchiveSafetyLimits,
     open_image_with_pixel_limit,
     screen_zip_members,
 )
+from astrid_label_noise import assess_label_noise
+from audit_history import build_audit_record, evaluate_policy, save_audit_record
 
 st.set_page_config(page_title="Image Dataset Trustworthiness Analyzer (Experimental)", page_icon="🔬", layout="wide")
 
@@ -449,6 +450,7 @@ METRIC_DOCS: Dict[str, Dict[str, Any]] = {
     "quality.duplicates": {"title": "Q12-Q13: Duplicates", "section": "Quality", "description": "Measures exact duplicates with SHA256 and near-duplicates with perceptual hashing.", "why_it_matters": "Duplicates can inflate confidence, reduce diversity, and leak content across splits.", "method": "Uses SHA256 for exact equality and perceptual hash Hamming distance for similarity.", "threshold_key": "exact_duplicate_rate_warn", "interpretation": "Lower is better. Near-duplicate handling also depends on the perceptual hash threshold.", "report_path": "quality.duplicates"},
     "quality.cross_split_leakage": {"title": "Q14: Cross-split leakage", "section": "Quality", "description": "Fraction of items whose exact content appears in more than one split.", "why_it_matters": "Leakage inflates validation and test performance estimates.", "method": "Groups SHA256 hashes and checks whether the split column has more than one value per hash.", "threshold_key": "cross_split_leakage_warn", "interpretation": "Near zero is expected.", "report_path": "quality.cross_split_leakage"},
     "quality.conflicting_duplicate_labels": {"title": "Q15: Conflicting duplicate labels", "section": "Quality", "description": "Fraction of exact duplicate groups that carry more than one label.", "why_it_matters": "Conflicting labels point to annotation disagreement or versioning errors.", "method": "Groups identical SHA256 hashes and counts unique labels within each group.", "threshold_key": "label_error_rate_warn", "interpretation": "Lower is better.", "report_path": "quality.conflicting_duplicate_labels"},
+    "quality.label_noise": {"title": "Q6: Suspected label-noise rate", "section": "Quality", "description": "Share of evaluated image labels for which an out-of-fold model confidently prefers another class.", "why_it_matters": "Likely annotation errors can cap visual model quality and distort evaluation.", "method": "Runs cross-validated logistic regression over low-level image statistics and ranks confident model-label disagreements.", "threshold_key": "label_error_rate_warn", "interpretation": "Lower is better. Candidates require human review and are not confirmed errors.", "report_path": "quality.label_noise"},
     "quality.class_balance": {"title": "Q16-Q18: Class balance", "section": "Quality", "description": "Entropy-based measures of class distribution balance.", "why_it_matters": "Severe imbalance can bias training and weaken minority-class performance.", "method": "Computes entropy, normalized entropy, and effective number of classes from label counts.", "threshold_key": None, "interpretation": "Higher normalized entropy usually means better balance.", "report_path": "quality.class_balance"},
     "reliability.annotator_agreement": {"title": "R1-R3: Annotator agreement", "section": "Reliability", "description": "Agreement between multiple annotators using pairwise Cohen kappa.", "why_it_matters": "Low agreement often signals ambiguous labels or inadequate annotation guidance.", "method": "Computes pairwise Cohen kappa across configured annotator columns.", "threshold_key": "annotator_agreement_kappa_warn", "interpretation": "Higher is better.", "report_path": "reliability.annotator_agreement"},
     "reliability.provenance_coverage": {"title": "R10: Provenance coverage", "section": "Reliability", "description": "Fraction of rows with at least one populated source or provenance field.", "why_it_matters": "Provenance supports repeatability, accountability, and auditability.", "method": "Checks whether any configured source column is non-null for each row.", "threshold_key": "traceability_coverage_warn", "interpretation": "Higher is better.", "report_path": "reliability.provenance_coverage"},
@@ -1249,6 +1251,70 @@ def _class_balance(meta_joined: Optional[pd.DataFrame], cfg: AssessConfig, img_d
         "max_class_count": int(max(counts.values())) if counts else 0,
     }
 
+
+def _label_noise_assessment(
+    img_df: pd.DataFrame,
+    meta_joined: Optional[pd.DataFrame],
+    cfg: AssessConfig,
+) -> Dict[str, Any]:
+    """Q6: model-based review candidates from low-level image features."""
+    if meta_joined is not None and cfg.label_col and cfg.label_col in meta_joined.columns:
+        source = meta_joined
+        labels = meta_joined[cfg.label_col]
+        label_source = f"metadata:{cfg.label_col}"
+    elif "folder_label" in img_df.columns:
+        source = img_df
+        labels = img_df["folder_label"]
+        label_source = "folder_structure"
+    else:
+        return {
+            "status": "skipped",
+            "note": "No metadata or folder-derived labels are available.",
+            "labeled_rows": 0,
+            "evaluated_rows": 0,
+            "suspected_label_noise_rate": None,
+            "suspected_label_noise_count": 0,
+            "top_suspected_samples": [],
+        }
+
+    feature_candidates = [
+        "width",
+        "height",
+        "short_side",
+        "long_side",
+        "aspect_ratio",
+        "megapixels",
+        "mean_r",
+        "mean_g",
+        "mean_b",
+        "std_r",
+        "std_g",
+        "std_b",
+        "brightness_mean",
+        "color_std_mean",
+        "blur_var_lap",
+        "entropy",
+        "mode",
+    ]
+    feature_cols = [c for c in feature_candidates if c in source.columns]
+    sample_id_col = "path_in_zip" if "path_in_zip" in source.columns else "filename"
+    sample_ids = (
+        source[sample_id_col]
+        if sample_id_col in source.columns
+        else pd.Series(source.index, index=source.index)
+    )
+    result = assess_label_noise(
+        source[feature_cols],
+        labels,
+        sample_ids=sample_ids,
+        random_state=cfg.random_state,
+        warning_threshold=cfg.thresholds.label_error_rate_warn,
+        max_samples=10000 if cfg.mode == "Full Scan" else 5000,
+        max_categorical_cardinality=20,
+    )
+    result["label_source"] = label_source
+    return result
+
 def _format_conformance(img_df: pd.DataFrame, allowed_formats: Optional[Set[str]] = None) -> Dict[str, Any]:
     """Q3: Format conformance rate."""
     if allowed_formats is None:
@@ -1413,6 +1479,7 @@ def assess_quality(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame],
         out["blur_proxy"] = {"note": "No images opened successfully."}
         out["duplicates"] = {"note": "No images opened successfully."}
         out["class_balance"] = {"note": "No images opened successfully."}
+        out["label_noise"] = {"note": "No images opened successfully.", "status": "skipped"}
         out["cross_split_leakage"] = {"note": "No images opened successfully."}
         out["conflicting_duplicate_labels"] = {"note": "No images opened successfully."}
         return out
@@ -1460,6 +1527,9 @@ def assess_quality(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame],
 
     # Q16-Q18: Class balance
     out["class_balance"] = _class_balance(meta_joined, cfg, img_df)
+
+    # Q6: Suspected label noise
+    out["label_noise"] = _label_noise_assessment(img_df, meta_joined, cfg)
 
     # For shared HTML report compatibility
     out["corrupt_images"] = out["readability"]
@@ -1947,7 +2017,7 @@ def assess_transparency(img_df: pd.DataFrame, meta_joined: Optional[pd.DataFrame
         ("Format conformance (Q3)", True),
         ("Metadata completeness (Q4)", meta_joined is not None),
         ("Split coverage (Q5)", cfg.split_col is not None),
-        ("Label error rate audit (Q6)", False),  # requires external audit
+        ("Suspected label-noise assessment (Q6)", cfg.label_col is not None or "folder_label" in img_df.columns),
         ("BBox validity (Q7)", len(annotation_records) > 0),
         ("Schema consistency (Q9)", len(annotation_records) > 0),
         ("Exact duplicate rate (Q12)", True),
@@ -2164,6 +2234,14 @@ def compute_metric_scores(report: Dict[str, Any], cfg: AssessConfig, weights: Op
         q_score -= min(5, leakage * 100)
         q_notes.append(f"Cross-split leakage {leakage:.4f}")
 
+    label_noise_rate = q.get("label_noise", {}).get("suspected_label_noise_rate")
+    if (
+        label_noise_rate is not None
+        and float(label_noise_rate) > cfg.thresholds.label_error_rate_warn
+    ):
+        q_score -= min(5, float(label_noise_rate) * 25)
+        q_notes.append(f"Suspected label noise {float(label_noise_rate):.4f}")
+
     schema_rate = q.get("annotation_schema_consistency", {}).get("schema_consistency_rate")
     if schema_rate is not None and schema_rate < cfg.thresholds.schema_consistency_warn:
         q_score -= min(3, (1 - schema_rate) * 30)
@@ -2354,6 +2432,14 @@ def build_recommendations(report: Dict[str, Any], cfg: AssessConfig) -> List[str
     conf_dup = q.get("conflicting_duplicate_labels", {}).get("conflict_duplicate_rate", 0.0)
     if conf_dup and conf_dup > 0:
         recs.append("Conflicting labels on duplicate images. Audit and resolve.")
+    label_noise_rate = q.get("label_noise", {}).get("suspected_label_noise_rate")
+    if (
+        label_noise_rate is not None
+        and float(label_noise_rate) > cfg.thresholds.label_error_rate_warn
+    ):
+        recs.append(
+            "Suspected label noise exceeds the threshold. Review ranked images and relabel confirmed issues."
+        )
 
     cb = q.get("class_balance", {})
     h_norm = cb.get("normalized_entropy")
@@ -2397,6 +2483,12 @@ def verdict_panel(report: Dict[str, Any], cfg: AssessConfig) -> Tuple[str, str, 
         reasons.append("Exact duplicates exceed threshold.")
     if q.get("cross_split_leakage", {}).get("cross_split_leakage_rate", 0.0) > cfg.thresholds.cross_split_leakage_warn:
         reasons.append("Cross-split leakage detected.")
+    label_noise_rate = q.get("label_noise", {}).get("suspected_label_noise_rate")
+    if (
+        label_noise_rate is not None
+        and float(label_noise_rate) > cfg.thresholds.label_error_rate_warn
+    ):
+        reasons.append("Suspected label-noise rate exceeds threshold.")
     drift = r.get("feature_drift_ks_first_last", {}).get("top_10_ks", {})
     if any(v is not None and float(v) > cfg.thresholds.drift_ks_threshold for v in drift.values()):
         reasons.append("Potential feature drift detected.")
@@ -2966,6 +3058,27 @@ with tab_quality:
     render_metric_block("Q14: Cross-split leakage", "quality.cross_split_leakage", q.get("cross_split_leakage", {}), cfg)
 
     render_metric_block("Q15: Conflicting duplicate labels", "quality.conflicting_duplicate_labels", q.get("conflicting_duplicate_labels", {}), cfg)
+
+    render_metric_doc("quality.label_noise", cfg)
+    st.write("**Q6: Label-noise assessment**")
+    label_noise = q.get("label_noise", {})
+    if label_noise.get("status") != "ok":
+        st.info(label_noise.get("note", "Label-noise assessment was skipped."))
+    else:
+        ln1, ln2, ln3 = st.columns(3)
+        with ln1:
+            st.metric(
+                "Suspected rate",
+                f"{label_noise['suspected_label_noise_rate']:.2%}",
+            )
+        with ln2:
+            st.metric("Candidates", str(label_noise["suspected_label_noise_count"]))
+        with ln3:
+            st.metric("Images evaluated", f"{label_noise['evaluated_rows']:,}")
+        candidates = label_noise.get("top_suspected_samples", [])
+        if candidates:
+            st.caption("Ranked review candidates; these are not confirmed annotation errors.")
+            st.dataframe(pd.DataFrame(candidates), use_container_width=True, hide_index=True)
 
     render_metric_doc("quality.class_balance", cfg)
     st.write("**Q16-Q18: Class balance**")

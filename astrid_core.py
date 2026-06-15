@@ -7,15 +7,16 @@ while the research workflow grows around this stable API.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
+from astrid_label_noise import assess_label_noise
 from audit_history import build_audit_record, evaluate_policy
 from utils import (
     DEFAULT_WEIGHTS,
@@ -45,15 +46,25 @@ except Exception:  # pragma: no cover - optional dependency
 class TabularThresholds:
     drift_ks_threshold: float
     pii_hit_rate_threshold: float
+    label_noise_rate_warn: float
 
 
 TABULAR_PRESETS: Dict[str, TabularThresholds] = {
     "Balanced (recommended)": TabularThresholds(
         drift_ks_threshold=0.30,
         pii_hit_rate_threshold=0.01,
+        label_noise_rate_warn=0.05,
     ),
-    "Strict": TabularThresholds(drift_ks_threshold=0.20, pii_hit_rate_threshold=0.005),
-    "Lenient": TabularThresholds(drift_ks_threshold=0.40, pii_hit_rate_threshold=0.02),
+    "Strict": TabularThresholds(
+        drift_ks_threshold=0.20,
+        pii_hit_rate_threshold=0.005,
+        label_noise_rate_warn=0.02,
+    ),
+    "Lenient": TabularThresholds(
+        drift_ks_threshold=0.40,
+        pii_hit_rate_threshold=0.02,
+        label_noise_rate_warn=0.10,
+    ),
 }
 
 
@@ -282,6 +293,45 @@ def assess_tabular_quality(df: pd.DataFrame, cfg: TabularAssessConfig) -> Dict[s
                 else None
             ),
         }
+
+        task_type = detect_tabular_task_type(df, cfg.label_col)
+        if task_type in {"Binary classification", "Multi-class classification"}:
+            excluded = {
+                cfg.label_col,
+                cfg.split_col,
+                cfg.time_col,
+                *cfg.annotator_label_cols,
+                *cfg.id_cols,
+            }
+            feature_cols = [c for c in df.columns if c not in excluded]
+            if cfg.id_cols:
+                valid_ids = [c for c in cfg.id_cols if c in df.columns]
+                sample_ids = (
+                    df[valid_ids].astype("string").fillna("<missing>").agg(" | ".join, axis=1)
+                    if valid_ids
+                    else pd.Series(df.index, index=df.index)
+                )
+            else:
+                sample_ids = pd.Series(df.index, index=df.index)
+            out["label_noise"] = assess_label_noise(
+                df[feature_cols],
+                y,
+                sample_ids=sample_ids,
+                random_state=cfg.random_state,
+                warning_threshold=cfg.thresholds.label_noise_rate_warn,
+                max_samples=10000 if cfg.mode == "Full Scan" else 5000,
+                max_categorical_cardinality=cfg.max_categories_for_stats * 2,
+            )
+        else:
+            out["label_noise"] = {
+                "status": "skipped",
+                "note": "Label-noise assessment currently supports classification labels only.",
+                "labeled_rows": int(y.notna().sum()),
+                "evaluated_rows": 0,
+                "suspected_label_noise_rate": None,
+                "suspected_label_noise_count": 0,
+                "top_suspected_samples": [],
+            }
 
     if cfg.annotator_label_cols:
         annotator_cols = [c for c in cfg.annotator_label_cols if c in df.columns]
@@ -581,6 +631,7 @@ def assess_tabular_all(
             "thresholds": {
                 "drift_ks_threshold": cfg.thresholds.drift_ks_threshold,
                 "pii_hit_rate_threshold": cfg.thresholds.pii_hit_rate_threshold,
+                "label_noise_rate_warn": cfg.thresholds.label_noise_rate_warn,
             },
         },
     }
@@ -611,6 +662,16 @@ def tabular_verdict(report: Dict[str, Any], cfg: TabularAssessConfig) -> Tuple[s
         reasons.append("Potential drift; at least one KS statistic exceeds the threshold.")
     if disparities and max(disparities) > 0.20:
         reasons.append("Group positive-rate disparity exceeds 0.20; audit fairness risk.")
+    label_noise_rate = report["quality"].get("label_noise", {}).get(
+        "suspected_label_noise_rate"
+    )
+    if (
+        label_noise_rate is not None
+        and float(label_noise_rate) > cfg.thresholds.label_noise_rate_warn
+    ):
+        reasons.append(
+            "Suspected label-noise rate exceeds the configured threshold; review ranked samples."
+        )
     if reasons:
         return "Needs review", "warn", reasons
     return "Looks OK (evidence-based)", "ok", ["No major red flags under current checks."]
@@ -625,6 +686,7 @@ def build_tabular_recommendations(report: Dict[str, Any], cfg: TabularAssessConf
     drift = report.get("reliability", {}).get("numeric_drift_ks_first_last", {}).get("top_10_ks", {})
     pii = report.get("security", {}).get("confidentiality_pii_heuristics", {}).get("columns_with_hits", {})
     group_checks = report.get("fairness", {}).get("group_checks", {})
+    label_noise_rate = quality.get("label_noise", {}).get("suspected_label_noise_rate")
 
     if missingness is not None and float(missingness) > 0.05:
         recs.append("Missingness > 5%; inspect top missing columns and decide: drop, impute, or recollect.")
@@ -643,6 +705,13 @@ def build_tabular_recommendations(report: Dict[str, Any], cfg: TabularAssessConf
     ]
     if disparities and max(disparities) > 0.20:
         recs.append("Fairness disparity detected; audit group coverage, labels, and collection process.")
+    if (
+        label_noise_rate is not None
+        and float(label_noise_rate) > cfg.thresholds.label_noise_rate_warn
+    ):
+        recs.append(
+            "Suspected label noise is above threshold; review the ranked candidates and correct or relabel confirmed issues."
+        )
     if not recs:
         recs.append("No major red flags. Keep the report as evidence and rerun after data updates.")
     return recs

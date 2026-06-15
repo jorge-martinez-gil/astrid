@@ -150,6 +150,18 @@ def test_build_html_report_supports_image_reports():
             "duplicates": {"exact_duplicate_rate": 0.0},
             "low_resolution": {"low_res_rate": 0.0},
             "metadata_completeness": {"metadata_completeness": 1.0},
+            "label_noise": {
+                "suspected_label_noise_rate": 0.05,
+                "top_suspected_samples": [
+                    {
+                        "sample_id": "train/a.jpg",
+                        "observed_label": "a",
+                        "suggested_label": "b",
+                        "suggested_confidence": 0.91,
+                        "noise_score": 0.84,
+                    }
+                ],
+            },
         },
         "reliability": {
             "feature_drift_ks_first_last": {"top_10_ks": {"brightness": 0.10}}
@@ -174,6 +186,8 @@ def test_build_html_report_supports_image_reports():
     )
 
     assert "Image Quality Signals" in html
+    assert "Suspected Label Noise" in html
+    assert "train/a.jpg" in html
     assert "images.zip" in html
     assert "SHA-256" in html
 

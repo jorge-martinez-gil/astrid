@@ -103,6 +103,7 @@ with c1:
     <li>PII heuristic scan</li>
     <li>Fairness proxies by group</li>
     <li>Label predictability AUC</li>
+    <li>Suspected label-noise candidates</li>
   </ul>
   <span class="open-hint">→ Open Analyzer</span>
 </div>
@@ -123,6 +124,7 @@ with c2:
     <li>Duplicate timestamp detection</li>
     <li>Time-sliced missingness trends</li>
     <li>KS drift first vs last slice</li>
+    <li>Suspected label-noise candidates</li>
     <li>Entity-level analysis</li>
     <li>PII scan &amp; identifier audit</li>
   </ul>
@@ -146,6 +148,7 @@ with c3:
     <li>Perceptual duplicate detection</li>
     <li>EXIF metadata extraction</li>
     <li>Label distribution (from folders)</li>
+    <li>Suspected label-noise candidates</li>
     <li>Class imbalance detection</li>
   </ul>
   <span class="open-hint">→ Open Analyzer</span>
