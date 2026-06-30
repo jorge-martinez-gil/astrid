@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """Headless ASTRID analysis API.
 
 This module contains reusable analysis functions that do not depend on

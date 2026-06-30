@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """Local audit history, comparison, and policy-gate helpers."""
 from __future__ import annotations
 

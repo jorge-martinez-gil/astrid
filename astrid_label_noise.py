@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """Reusable, model-based label-noise assessment.
 
 The assessor is intentionally conservative: it uses out-of-fold predictions
@@ -232,6 +234,28 @@ def assess_label_noise(
     suspected = (predicted != y_encoded) & (suggested_confidence >= confidence_threshold)
     noise_score = suggested_confidence - assigned_probability
 
+    # Confident-learning estimate of the label-noise rate (Northcutt et al.).
+    # Unlike the conservative confident-disagreement count above, this uses
+    # per-class self-confidence thresholds and counts rows that are confident
+    # examples of a class other than their observed label. It is far more
+    # monotonic in the true noise rate, because it does not collapse once many
+    # labels are corrupted (a single global confidence cut does).
+    num_label_classes = probabilities.shape[1]
+    class_thresholds = np.array(
+        [
+            probabilities[y_encoded == j, j].mean() if np.any(y_encoded == j) else 1.0
+            for j in range(num_label_classes)
+        ]
+    )
+    above_threshold = probabilities >= class_thresholds[None, :]
+    masked_probs = np.where(above_threshold, probabilities, -np.inf)
+    confident_class = masked_probs.argmax(axis=1)
+    has_confident_class = np.isfinite(masked_probs.max(axis=1))
+    confident_other_class = has_confident_class & (confident_class != y_encoded)
+    cl_noise_rate = (
+        float(confident_other_class.sum() / len(y_encoded)) if len(y_encoded) else None
+    )
+
     candidate_positions = np.flatnonzero(suspected)
     ranked_positions = candidate_positions[np.argsort(noise_score[candidate_positions])[::-1]]
     candidates = []
@@ -281,6 +305,7 @@ def assess_label_noise(
         "warning_threshold": float(warning_threshold),
         "suspected_label_noise_count": suspected_count,
         "suspected_label_noise_rate": suspected_rate,
+        "estimated_label_noise_rate": cl_noise_rate,
         "out_of_fold_accuracy": float((predicted == y_encoded).mean()),
         "mean_assigned_label_probability": float(assigned_probability.mean()),
         "features_used": [str(c) for c in feature_cols],

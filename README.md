@@ -55,7 +55,7 @@ Within a broader MLOps workflow, ASTRID fits naturally at the data-validation ga
 ## Key Features
 
 - **Multi-modal support** — dedicated analyzers for tabular data (CSV/Parquet/Excel), time-series (CSV/Parquet), and image datasets (ZIP archives with optional metadata CSV).
-- **Five reliability dimensions** — every dataset is evaluated across Quality, Security, Reliability, Robustness, and Fairness, each with multiple concrete checks.
+- **Five weighted reliability dimensions** — every dataset is evaluated across Quality, Security, Reliability, Robustness, and Fairness, each with multiple concrete checks, plus a sixth **Transparency** data-card dimension (zero default weight on tabular/time-series; a small default weight on images).
 - **Configurable metric weights** — users can adjust the contribution of each dimension to the composite health score directly from the sidebar, with automatic normalisation so values do not need to sum to exactly 100.
 - **Automated recommendations** — after each analysis run ASTRID generates a prioritised list of plain-language remediation actions.
 - **HTML report export** — a self-contained HTML report can be downloaded after every analysis and shared with colleagues or archived as compliance evidence.

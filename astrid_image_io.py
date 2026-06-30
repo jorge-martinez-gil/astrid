@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """Resource-safe helpers for image archive ingestion."""
 from __future__ import annotations
 

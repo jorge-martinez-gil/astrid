@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))

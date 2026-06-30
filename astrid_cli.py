@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """Command-line entry point for ASTRID.
 
 Allows running tabular dataset audits headlessly — suitable for CI gates,

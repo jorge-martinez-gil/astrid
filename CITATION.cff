@@ -1,0 +1,45 @@
+cff-version: 1.2.0
+message: "If you use ASTRID, please cite the software using these metadata."
+title: "ASTRID: Advanced Software Tools for Reliable Industrial Datasets"
+abstract: >-
+  ASTRID is a local-first, multimodal tool for auditing dataset reliability
+  and risk in industrial AI. It analyses tabular, time-series, and image data,
+  computes an interpretable 0-100 health score with a letter grade from five
+  weighted reliability dimensions (quality, security, reliability, robustness,
+  fairness) alongside a transparency data-card layer, separates that score from
+  a configurable policy gate, and maps findings to EU AI Act and ISO/IEC 25012
+  evidence areas.
+type: software
+version: 1.0.0
+date-released: "2026-06-23"
+license: MIT
+repository-code: "https://github.com/jorge-martinez-gil/astrid"
+url: "https://github.com/jorge-martinez-gil/astrid"
+keywords:
+  - dataset reliability
+  - data quality auditing
+  - data governance
+  - MLOps
+  - EU AI Act
+  - ISO/IEC 25012
+  - industrial AI
+authors:
+  - family-names: "Martinez-Gil"
+    given-names: "Jorge"
+    orcid: "https://orcid.org/0000-0002-5730-7965"
+    affiliation: "Software Competence Center Hagenberg (SCCH)"
+  - family-names: "Ramler"
+    given-names: "Rudolf"
+    orcid: "https://orcid.org/0000-0001-9903-6107"
+    affiliation: "Software Competence Center Hagenberg (SCCH)"
+  - family-names: "Picard"
+    given-names: "Francois"
+    affiliation: "Danish Technological Institute"
+  - family-names: "Belmerhnia"
+    given-names: "Leila"
+    orcid: "https://orcid.org/0009-0008-2340-7619"
+    affiliation: "PREDICT"
+  - family-names: "Spathoulas"
+    given-names: "Georgios"
+    orcid: "https://orcid.org/0000-0003-2947-486X"
+    affiliation: "Norwegian University of Science and Technology (NTNU)"

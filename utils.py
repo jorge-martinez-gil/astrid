@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jorge Martinez-Gil and the ASTRID authors. See LICENSE.
 """
 Shared utilities for Unified Dataset Safety Analyzer.
 Import in each page with:
@@ -635,7 +637,14 @@ def compute_health_score(
     ]
     if leak is not None:
         q_scores.append(0.0 if float(leak) > 0 else 1.0)
-    if label_noise_rate is not None:
+    cl_noise_rate = label_noise.get("estimated_label_noise_rate", None)
+    if cl_noise_rate is not None:
+        # Confident-learning label-noise estimate (Northcutt et al.): full credit
+        # until ~20% of rows look like confident examples of another class, then
+        # linear to zero by ~50% (chance for a balanced binary problem). This is
+        # monotonic in the true noise rate, unlike the conservative count.
+        q_scores.append(score_above_warning(float(cl_noise_rate), 0.20, 0.50))
+    elif label_noise_rate is not None:
         severe = max(0.20, float(label_noise_warn) * 4.0)
         q_scores.append(score_above_warning(label_noise_rate, float(label_noise_warn), severe))
     components["quality"] = (sum(q_scores) / len(q_scores)) * norm_w["quality"]

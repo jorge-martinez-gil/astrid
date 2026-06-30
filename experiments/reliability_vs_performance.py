@@ -60,12 +60,6 @@ DATASETS = {
         "max_rows": 8000,
         "max_features": 120,
     },
-    "robot": {
-        "path": "Datasets/robot/astrid_dataset.csv",
-        "label": "failure_binary",
-        "drop_cols": ["class_label", "source_file", "learning_problem", "task_description"],
-        "max_rows": None,
-    },
 }
 
 DEFAULT_FAULTS = ["missingness", "outliers", "duplicates", "combined", "label_noise"]
